@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { DesktopWindowChrome } from './components/DesktopWindowChrome'
 import { ErrorBoundary } from './ErrorBoundary'
@@ -12,13 +13,23 @@ import { PresenterPage } from './routes/PresenterPage'
 import { SessionReportPage } from './routes/SessionReportPage'
 import { WordCloudPage } from './routes/WordCloudPage'
 import { BackendSetup } from './components/BackendSetup'
-import { isSupabaseConfigured } from './lib/supabase'
+import { authReady, isSupabaseConfigured } from './lib/supabase'
 import { useSessionReportBack } from './lib/sessionReportNavigation'
 
 function AppRoutes() {
   const location = useLocation()
   const returnFromSessionReport = useSessionReportBack()
   const isDesktop = Boolean(window.interactDesktop)
+  const [authSettled, setAuthSettled] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    void authReady.finally(() => {
+      if (!cancelled) setAuthSettled(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const isDesktopOverlay = location.pathname.startsWith('/desktop-overlay/')
   const isCustomQuizReview = location.pathname.startsWith('/custom-quiz-review/')
   const isDesktopPresenter = isDesktop && location.pathname.startsWith('/presenter/') && location.pathname !== '/presenter/new'
@@ -35,6 +46,10 @@ function AppRoutes() {
         <BackendSetup />
       </div>
     )
+  }
+
+  if (!authSettled) {
+    return <div className={isDesktop ? 'desktop-shell' : undefined} aria-busy="true" />
   }
 
   return (

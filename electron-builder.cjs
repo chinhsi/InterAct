@@ -59,4 +59,21 @@ module.exports = {
   portable: {
     requestExecutionLevel: 'user',
   },
+  mac: {
+    icon: 'build/icon.png',
+    category: 'public.app-category.education',
+    // Local build: explicit ad-hoc signature ('-'), no notarization. Publishing
+    // to others needs a Developer ID identity plus hardenedRuntime + notarize.
+    identity: '-',
+    hardenedRuntime: false,
+    gatekeeperAssess: false,
+    extendInfo: {
+      NSMicrophoneUsageDescription: 'InterAct 需要麥克風以提供即時字幕與口譯。',
+      NSCameraUsageDescription: 'InterAct 需要攝影機以提供課堂互動功能。',
+    },
+    target: [
+      { target: 'dir', arch: ['arm64'] },
+      { target: 'zip', arch: ['arm64'] },
+    ],
+  },
 }

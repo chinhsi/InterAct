@@ -3,6 +3,7 @@ import { generateCustomQuiz } from '../_shared/custom-quiz.ts'
 import { analyzeFileResponse, isAnalyzableFile } from '../_shared/file-analysis.ts'
 import { getAdminClient, hashPresenterToken } from '../_shared/supabase.ts'
 import { isOwner, ownerKeyConfigured, ownerRefusalMessage } from '../_shared/owner.ts'
+import { callerUid, registerPresenter } from '../_shared/auth.ts'
 
 type ParticipantRecord = { id: string; name: string }
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -164,12 +165,16 @@ Deno.serve(async (req) => {
       if (!ownerKeyConfigured()) {
         return jsonResponse({ ok: true, configured: false, message: '這個專案尚未設定管理金鑰，目前任何電腦都能開課。請執行一次自動部署以產生金鑰。' })
       }
-      if (isOwner(input)) return jsonResponse({ ok: true, configured: true, message: '金鑰正確，這台電腦可以開課與管理場次。' })
+      if (isOwner(input)) {
+        await registerPresenter(supabase, await callerUid(req))
+        return jsonResponse({ ok: true, configured: true, message: '金鑰正確，這台電腦可以開課與管理場次。' })
+      }
       return jsonResponse({ ok: false, configured: true, message: ownerRefusalMessage(input) })
     }
 
     if (action === 'list_sessions') {
       if (isOwner(input)) {
+        await registerPresenter(supabase, await callerUid(req))
         const { data: owned, error: ownedError } = await supabase
           .from('sessions')
           .select('id, title, code, status, created_at, ended_at')

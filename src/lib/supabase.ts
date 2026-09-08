@@ -104,6 +104,21 @@ if (supabase) {
   }
 }
 
+// Reads are scoped by row-level security to the sessions this browser belongs
+// to, and membership is keyed on an anonymous Supabase Auth user. Resolve once
+// at startup; App waits on it before rendering anything that queries.
+export const authReady: Promise<void> = (async () => {
+  if (!supabase) return
+  try {
+    const { data } = await supabase.auth.getSession()
+    if (data.session) return
+    const { error } = await supabase.auth.signInAnonymously()
+    if (error) console.error('Anonymous sign-in failed', error)
+  } catch (error) {
+    console.error('Anonymous sign-in failed', error)
+  }
+})()
+
 export function requireSupabase() {
   if (!supabase) {
     throw new Error('Supabase 尚未設定。請建立 .env 並填入 VITE_SUPABASE_URL 與 VITE_SUPABASE_ANON_KEY。')

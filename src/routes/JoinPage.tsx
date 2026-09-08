@@ -72,15 +72,14 @@ export function JoinPage() {
     let cancelled = false
     setSessionChecked(false)
     setSessionLookupError('')
-    const isSessionId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionReference)
+    // Sessions are not readable before joining (row-level security), so the
+    // preview goes through the Edge Function instead of a direct select.
     requireSupabase()
-      .from('sessions')
-      .select('*')
-      .eq(isSessionId ? 'id' : 'code', sessionReference)
-      .maybeSingle()
+      .functions.invoke('participant-action', { body: { action: 'lookup_session', sessionReference } })
       .then(({ data, error: lookupError }) => {
         if (cancelled) return
-        setSession((data as Session | null) || null)
+        const found = (data as { session?: Session | null } | null)?.session || null
+        setSession(found)
         setSessionLookupError(lookupError ? (locale === 'en' ? 'Unable to load this session. Please refresh and try again.' : '暫時無法載入場次，請重新整理後再試。') : '')
         setSessionChecked(true)
       })

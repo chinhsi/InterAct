@@ -2,6 +2,7 @@ import { corsHeaders, jsonResponse, errorDetail } from '../_shared/ai.ts'
 import { analyzeAudioResponse, removeRecording } from '../_shared/audio-analysis.ts'
 import { gradeCustomQuizAttempt } from '../_shared/custom-quiz.ts'
 import { getAdminClient, hashParticipantToken } from '../_shared/supabase.ts'
+import { callerUid } from '../_shared/auth.ts'
 
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 
@@ -55,11 +56,29 @@ Deno.serve(async (req) => {
     action = typeof input.action === 'string' ? input.action : ''
     const supabase = getAdminClient()
 
+    // The join page previews the class before asking for a name. Sessions are
+    // no longer readable before joining, so the lookup happens here instead.
+    if (action === 'lookup_session') {
+      const reference = typeof input.sessionReference === 'string' ? input.sessionReference.trim() : ''
+      if (!reference) return jsonResponse({ message: '場次資料不完整。' }, 400)
+      const { data: session, error: sessionError } = await supabase
+        .from('sessions')
+        .select('*')
+        .eq(validUuid(reference) ? 'id' : 'code', reference)
+        .maybeSingle()
+      if (sessionError) throw sessionError
+      return jsonResponse({ session: session || null })
+    }
+
     if (action === 'join_session') {
       const reference = typeof input.sessionReference === 'string' ? input.sessionReference.trim() : ''
       const name = typeof input.name === 'string' ? input.name.trim().slice(0, 80) : ''
       const deviceId = typeof input.deviceId === 'string' ? input.deviceId.trim().slice(0, 200) : ''
       if (!reference || !name || !deviceId) return jsonResponse({ message: '姓名或場次資料不完整。' }, 400)
+      // Row-level security keys every later read on this uid, so a join without
+      // one would succeed here and then see nothing.
+      const authUid = await callerUid(req)
+      if (!authUid) return jsonResponse({ message: '瀏覽器尚未完成登入，請重新整理頁面後再加入。' }, 401)
 
       const isId = validUuid(reference)
       const { data: session, error: sessionError } = await supabase
@@ -100,7 +119,18 @@ Deno.serve(async (req) => {
       if (!participant) {
         const { data, error } = await supabase
           .from('participants')
-          .insert({ session_id: session.id, name, device_id: deviceId })
+          .insert({ session_id: session.id, name, device_id: deviceId, auth_uid: authUid })
+          .select('*')
+          .single()
+        if (error) throw error
+        participant = data
+      } else if (participant.auth_uid !== authUid) {
+        // Same device, new anonymous user (cleared site data): move the row
+        // over rather than locking the student out of their own answers.
+        const { data, error } = await supabase
+          .from('participants')
+          .update({ auth_uid: authUid })
+          .eq('id', participant.id)
           .select('*')
           .single()
         if (error) throw error

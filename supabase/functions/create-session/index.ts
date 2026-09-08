@@ -1,6 +1,7 @@
 import { corsHeaders, jsonResponse, errorDetail } from '../_shared/ai.ts'
 import { getAdminClient, hashPresenterToken } from '../_shared/supabase.ts'
 import { isOwner, ownerKeyConfigured, ownerRefusalMessage } from '../_shared/owner.ts'
+import { callerUid, registerPresenter } from '../_shared/auth.ts'
 
 const codeAlphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const speakerLanguages = new Set(['zh-tw', 'en'])
@@ -51,6 +52,9 @@ Deno.serve(async (req) => {
     const presenterToken = `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll('-', '')
     const tokenHash = await hashPresenterToken(presenterToken)
     const supabase = getAdminClient()
+    // The owner key checked above proves this browser is the teacher's; its
+    // uid is what lets the presenter windows read every session directly.
+    await registerPresenter(supabase, await callerUid(req))
 
     let session = null
     for (let attempt = 0; attempt < 5; attempt += 1) {

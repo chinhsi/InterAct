@@ -23,3 +23,12 @@ verify_jwt = false
 
 [functions.openai-realtime-session]
 verify_jwt = false
+
+# InterAct hardening: every browser signs in anonymously so row-level security
+# can scope reads to the sessions it belongs to. A whole class joins from one
+# campus IP, so the default 30/hour anonymous sign-in cap would lock students out.
+[auth]
+enable_anonymous_sign_ins = true
+
+[auth.rate_limit]
+anonymous_users = 500
