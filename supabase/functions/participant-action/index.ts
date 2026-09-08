@@ -107,30 +107,60 @@ Deno.serve(async (req) => {
         })
       }
 
+      // Identity is keyed on the anonymous auth user, which only this browser
+      // can present. device_id is client-chosen and readable by classmates, so
+      // it is trusted only to adopt rows that predate auth_uid (null); a
+      // device_id someone else owns never hands over their row.
       const { data: existing, error: existingError } = await supabase
         .from('participants')
         .select('*')
         .eq('session_id', session.id)
-        .eq('device_id', deviceId)
+        .eq('auth_uid', authUid)
+        .order('joined_at')
+        .limit(1)
         .maybeSingle()
       if (existingError) throw existingError
 
       let participant = existing
       if (!participant) {
-        const { data, error } = await supabase
+        const { data: legacy, error: legacyError } = await supabase
           .from('participants')
-          .insert({ session_id: session.id, name, device_id: deviceId, auth_uid: authUid })
           .select('*')
-          .single()
-        if (error) throw error
-        participant = data
-      } else if (participant.auth_uid !== authUid) {
-        // Same device, new anonymous user (cleared site data): move the row
-        // over rather than locking the student out of their own answers.
+          .eq('session_id', session.id)
+          .eq('device_id', deviceId)
+          .is('auth_uid', null)
+          .order('joined_at')
+          .limit(1)
+          .maybeSingle()
+        if (legacyError) throw legacyError
+        if (legacy) {
+          const { data, error } = await supabase
+            .from('participants')
+            .update({ auth_uid: authUid })
+            .eq('id', legacy.id)
+            .is('auth_uid', null)
+            .select('*')
+            .maybeSingle()
+          if (error) throw error
+          participant = data
+        }
+      }
+      if (!participant) {
+        // (session_id, device_id) is unique. A device id already held by another
+        // user is not evidence of anything (classmates can read it), so this
+        // caller simply gets its own row under a namespaced device id.
+        const { data: taken, error: takenError } = await supabase
+          .from('participants')
+          .select('id')
+          .eq('session_id', session.id)
+          .eq('device_id', deviceId)
+          .limit(1)
+          .maybeSingle()
+        if (takenError) throw takenError
+        const storedDeviceId = taken ? `${deviceId.slice(0, 160)}~${authUid.slice(0, 8)}` : deviceId
         const { data, error } = await supabase
           .from('participants')
-          .update({ auth_uid: authUid })
-          .eq('id', participant.id)
+          .insert({ session_id: session.id, name, device_id: storedDeviceId, auth_uid: authUid })
           .select('*')
           .single()
         if (error) throw error
@@ -575,6 +605,11 @@ Deno.serve(async (req) => {
 
     const eventId = typeof input.eventId === 'string' ? input.eventId : ''
     if (!eventId) return jsonResponse({ message: '找不到這次搶答。' }, 400)
+    // Buzzing in on someone else's behalf only needs their ids, which
+    // classmates can read; the token is what proves this is that student.
+    if (!(await verifyParticipant(supabase, sessionId, participantId, participantToken))) {
+      return jsonResponse({ message: '學員驗證失敗，請重新加入場次。' }, 401)
+    }
 
     const [{ data: session, error: sessionError }, { data: participant, error: participantError }] = await Promise.all([
       supabase

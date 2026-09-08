@@ -17,6 +17,7 @@ try {
 
   Write-Host 'Creating the InterAct database, Realtime publication, and Storage bucket...'
   Invoke-Checked 'pnpm.cmd' @('dlx', 'supabase', 'db', 'query', '--linked', '--file', 'supabase/schema.sql')
+  Invoke-Checked 'pnpm.cmd' @('dlx', 'supabase', 'db', 'query', '--linked', '--file', 'supabase/hardening.sql')
 
   Write-Host 'Deploying the core Edge Functions...'
   Invoke-Checked 'pnpm.cmd' (@('dlx', 'supabase', 'functions', 'deploy') + $coreFunctions + @('--project-ref', $ProjectRef, '--no-verify-jwt', '--use-api'))

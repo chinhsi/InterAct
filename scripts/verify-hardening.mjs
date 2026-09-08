@@ -101,6 +101,41 @@ check('join_session records auth_uid', participant.auth_uid === student.uid, `au
   check('presenter reads messages', m.rows === 1, JSON.stringify(m))
 }
 
+// 5b. Joining with a classmate's device_id must not hand over their row.
+{
+  const hijack = await stranger.c.functions.invoke('participant-action', {
+    body: { action: 'join_session', sessionReference: sessionId, name: '冒名者', deviceId: participant.device_id },
+  })
+  const got = hijack.data?.participant
+  let hijackDetail = `id=${got?.id}`
+  if (hijack.error) {
+    hijackDetail = hijack.error.message
+    try { hijackDetail += ' ' + JSON.stringify(await hijack.error.context?.json()) } catch {}
+  }
+  check('join with stolen device_id yields a separate participant', Boolean(got) && got.id !== participant.id, hijackDetail)
+  const victim = await student.c.from('participants').select('auth_uid').eq('id', participant.id).single()
+  check('victim row keeps its auth_uid', victim.data?.auth_uid === student.uid, JSON.stringify(victim.data))
+  const again = await student.c.functions.invoke('participant-action', {
+    body: { action: 'join_session', sessionReference: sessionId, name: participant.name, deviceId: participant.device_id },
+  })
+  check('victim rejoining gets the same row', again.data?.participant?.id === participant.id, again.error?.message || '')
+}
+
+// 5c. claim_buzzer without the participant token is refused.
+{
+  const buzz = await stranger.c.functions.invoke('participant-action', {
+    body: { action: 'claim_buzzer', sessionId, participantId: participant.id, eventId: crypto.randomUUID() },
+  })
+  const status = buzz.error?.context?.status
+  check('claim_buzzer without token is refused', status === 401, `status=${status ?? 'ok'}`)
+}
+
+// 5d. Presence RPC is no longer callable from the browser.
+{
+  const rpc = await stranger.c.rpc('bump_participant_presence', { target_id: participant.id, unfocused_delta: 1, focus_streak: 1 })
+  check('bump_participant_presence not callable by anon', Boolean(rpc.error), rpc.error?.message || 'call succeeded')
+}
+
 // 6. Second student in a different (nonexistent) session cannot see this one.
 {
   const other = await anon('other')
@@ -122,8 +157,10 @@ check('join_session records auth_uid', participant.auth_uid === student.uid, `au
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') reject(new Error(`${who} realtime ${status}: ${err?.message || ''}`))
       })
   })
+  // 'stranger' became a member in 5b, so use a fresh outsider here.
+  const outsider = await anon('outsider')
   const studentChannel = await subscribe(student.c, 'student')
-  const strangerChannel = await subscribe(stranger.c, 'stranger')
+  const strangerChannel = await subscribe(outsider.c, 'stranger')
   await new Promise((r) => setTimeout(r, 1500))
   const upd = await presenter.c.functions.invoke('presenter-action', {
     body: { action: 'update_session', sessionId, presenterToken, danmakuEnabled: false },
@@ -131,9 +168,9 @@ check('join_session records auth_uid', participant.auth_uid === student.uid, `au
   check('presenter update_session', !upd.error, upd.error?.message || '')
   await new Promise((r) => setTimeout(r, 4000))
   check('student realtime receives own session update', seen.student >= 1, `events=${seen.student}`)
-  check('stranger realtime receives nothing', seen.stranger === 0, `events=${seen.stranger}`)
+  check('outsider realtime receives nothing', seen.stranger === 0, `events=${seen.stranger}`)
   await student.c.removeChannel(studentChannel)
-  await stranger.c.removeChannel(strangerChannel)
+  await outsider.c.removeChannel(strangerChannel)
 }
 
 // Cleanup.

@@ -49,6 +49,11 @@ revoke all on function public.interact_member_of(uuid) from public;
 grant execute on function public.interact_is_presenter() to anon, authenticated;
 grant execute on function public.interact_member_of(uuid) to anon, authenticated;
 
+-- Presence is bumped by the heartbeat Edge Function (service role). The RPC
+-- runs as definer and takes any participant id, so it must not stay public.
+revoke all on function public.bump_participant_presence(uuid, bigint, bigint) from public, anon, authenticated;
+grant execute on function public.bump_participant_presence(uuid, bigint, bigint) to service_role;
+
 -- Participants are inserted only by the join_session Edge Function (service
 -- role), so the browser never needs INSERT on this table.
 drop policy if exists "join active sessions" on public.participants;
@@ -57,54 +62,67 @@ revoke insert on public.participants from anon, authenticated;
 -- ---- SELECT policies: members only -----------------------------------------
 
 drop policy if exists "mvp read sessions" on public.sessions;
+drop policy if exists "members read sessions" on public.sessions;
 create policy "members read sessions" on public.sessions for select
 to anon, authenticated using (public.interact_member_of(id));
 
 drop policy if exists "mvp read participants" on public.participants;
+drop policy if exists "members read participants" on public.participants;
 create policy "members read participants" on public.participants for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "mvp read messages" on public.messages;
+drop policy if exists "members read messages" on public.messages;
 create policy "members read messages" on public.messages for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "mvp read screenshots" on public.screenshots;
+drop policy if exists "members read screenshots" on public.screenshots;
 create policy "members read screenshots" on public.screenshots for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "mvp read questions" on public.questions;
+drop policy if exists "members read questions" on public.questions;
 create policy "members read questions" on public.questions for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "mvp read answers" on public.answers;
+drop policy if exists "members read answers" on public.answers;
 create policy "members read answers" on public.answers for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "mvp read ai summaries" on public.ai_summaries;
+drop policy if exists "members read ai summaries" on public.ai_summaries;
 create policy "members read ai summaries" on public.ai_summaries for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "mvp read exit tickets" on public.exit_tickets;
+drop policy if exists "members read exit tickets" on public.exit_tickets;
 create policy "members read exit tickets" on public.exit_tickets for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "public read shared contents" on public.shared_contents;
+drop policy if exists "members read shared contents" on public.shared_contents;
 create policy "members read shared contents" on public.shared_contents for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "public read shared files" on public.shared_files;
+drop policy if exists "members read shared files" on public.shared_files;
 create policy "members read shared files" on public.shared_files for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "public read caption segments" on public.caption_segments;
+drop policy if exists "members read caption segments" on public.caption_segments;
 create policy "members read caption segments" on public.caption_segments for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "public read session events" on public.session_events;
+drop policy if exists "members read session events" on public.session_events;
 create policy "members read session events" on public.session_events for select
 to anon, authenticated using (public.interact_member_of(session_id));
 
 drop policy if exists "read dispatched quizzes" on public.quizzes;
+drop policy if exists "members read dispatched quizzes" on public.quizzes;
 create policy "members read dispatched quizzes" on public.quizzes for select
 to anon, authenticated
 using (
@@ -117,6 +135,7 @@ using (
 );
 
 drop policy if exists "read dispatched quiz items" on public.quiz_items;
+drop policy if exists "members read dispatched quiz items" on public.quiz_items;
 create policy "members read dispatched quiz items" on public.quiz_items for select
 to anon, authenticated
 using (

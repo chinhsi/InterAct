@@ -17,6 +17,12 @@ const schemaSql = Object.values(
   import.meta.glob('/supabase/schema.sql', { query: '?raw', import: 'default', eager: true }),
 )[0] as string | undefined
 
+// Must run after schema.sql on every deploy: schema.sql recreates the open
+// "using (true)" policies, and hardening.sql is what replaces them.
+const hardeningSql = Object.values(
+  import.meta.glob('/supabase/hardening.sql', { query: '?raw', import: 'default', eager: true }),
+)[0] as string | undefined
+
 export const deployableFunctions = [
   'create-session',
   'participant-action',
@@ -130,7 +136,9 @@ async function query(ref: string, token: string, sql: string, whatFailed: string
 
 export async function runSchema(ref: string, token: string) {
   if (!schemaSql) throw new Error('找不到 schema.sql。')
+  if (!hardeningSql) throw new Error('找不到 hardening.sql。')
   await query(ref, token, schemaSql, '建立資料表失敗')
+  await query(ref, token, hardeningSql, '套用存取限制失敗')
 }
 
 // Confirms the project really has what the app needs. Without this a schema that

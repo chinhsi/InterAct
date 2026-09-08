@@ -40,7 +40,10 @@ Deno.serve(async (req) => {
     const input = await req.json()
     // Starting a class spends this project's own Gemini and OpenAI credits, so
     // it takes more than the publishable key every student already holds.
-    if (ownerKeyConfigured() && !isOwner(input)) return jsonResponse({ message: ownerRefusalMessage(input) }, 403)
+    // Fail closed: with reads scoped by presenter registration, an unset key
+    // would let any anonymous caller register itself and read every class.
+    if (!ownerKeyConfigured()) return jsonResponse({ message: '這個專案尚未設定管理金鑰，無法開課。請先執行一次自動部署以產生金鑰。' }, 403)
+    if (!isOwner(input)) return jsonResponse({ message: ownerRefusalMessage(input) }, 403)
     const title = typeof input.title === 'string' ? input.title.trim().slice(0, 120) : ''
     const sourceLanguage = normalizedLanguage(input.captionSourceLanguage, speakerLanguages)
     const interpretationLanguages = Array.isArray(input.interpretationLanguages)
