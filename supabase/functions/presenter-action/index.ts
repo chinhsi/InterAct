@@ -1,6 +1,7 @@
 import { callAiJson, corsHeaders, jsonResponse, errorDetail, geminiThinkingConfig, requestGemini } from '../_shared/ai.ts'
 import { generateCustomQuiz } from '../_shared/custom-quiz.ts'
-import { generateImageRegions, generateMatchingPairs, generateOrderingItems } from '../_shared/question-items.ts'
+import { generateImageRegions, generateMatchingPairs, generateOrderingItems, generateRatingPrompt } from '../_shared/question-items.ts'
+import { RATING_OPTIONS } from '../_shared/rating.ts'
 import { analyzeFileResponse, isAnalyzableFile } from '../_shared/file-analysis.ts'
 import { attachBoardUrls, BOARD_KINDS } from '../_shared/board.ts'
 import { getAdminClient, hashPresenterToken } from '../_shared/supabase.ts'
@@ -9,10 +10,10 @@ import { notifyHandsLowered, notifyQuizScoreChanged } from '../_shared/classroom
 
 type ParticipantRecord = { id: string; name: string }
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const questionTypes = new Set(['send_screen', 'poll', 'multiple_choice', 'true_false', 'short_answer', 'pronunciation', 'oral_response', 'file_upload', 'drawing', 'hotspot', 'ordering', 'matching', 'board', 'camera_poll'])
+const questionTypes = new Set(['send_screen', 'poll', 'rating', 'multiple_choice', 'true_false', 'short_answer', 'pronunciation', 'oral_response', 'file_upload', 'drawing', 'hotspot', 'ordering', 'matching', 'board', 'camera_poll'])
 const boardKinds = new Set<string>(BOARD_KINDS)
 const timedTypes = new Set([
-  'poll', 'multiple_choice', 'true_false', 'short_answer', 'pronunciation', 'oral_response',
+  'poll', 'rating', 'multiple_choice', 'true_false', 'short_answer', 'pronunciation', 'oral_response',
   'hotspot', 'ordering', 'matching',
 ])
 const spokenTypes = new Set(['pronunciation', 'oral_response'])
@@ -905,7 +906,7 @@ Deno.serve(async (req) => {
         return jsonResponse({ message: '截圖路徑不正確。' }, 400)
       }
 
-      const options = normalizedOptions(input.options)
+      const options = type === 'rating' ? RATING_OPTIONS : normalizedOptions(input.options)
       const allowMultiple = Boolean(input.allowMultiple) && ['poll', 'multiple_choice'].includes(type)
       const prepareSeconds = spokenTypes.has(type) ? timingSeconds(input.prepareSeconds, 300) : null
       const answerSeconds = timedTypes.has(type) ? timingSeconds(input.answerSeconds, 600) : null
@@ -991,10 +992,11 @@ Deno.serve(async (req) => {
       if (prepareSeconds === undefined || answerSeconds === undefined) {
         return jsonResponse({ message: '時間設定不正確。' }, 400)
       }
-      const promptText = typeof input.promptText === 'string' ? input.promptText.trim().slice(0, 1000) : ''
+      let promptText = typeof input.promptText === 'string' ? input.promptText.trim().slice(0, 1000) : ''
       const titles: Record<string, string> = {
         send_screen: '派送畫面',
         poll: '投票題',
+        rating: '評分題',
         multiple_choice: '選擇題',
         true_false: '是非題',
         short_answer: '問答題',
@@ -1012,17 +1014,22 @@ Deno.serve(async (req) => {
       // translator wastes a call to get the same URLs back.
       const translatable = options.some((option) => option.startsWith('http')) ? [] : options
       let translations = {}
-      try {
-        translations = await translateQuestion(titles[type], promptText, translatable)
-      } catch (translationError) {
-        console.error('question translation failed', translationError instanceof Error ? translationError.message : translationError)
-      }
       const { data: objectList, error: objectError } = await supabase.storage
         .from('interact-screenshots')
         .list(`sessions/${sessionId}/screenshots`, { search: `${screenshotId}.`, limit: 2 })
       if (objectError) throw objectError
       if (!objectList?.some((object) => storagePath.endsWith(`/${object.name}`))) {
         return jsonResponse({ message: '找不到已上傳的截圖。' }, 400)
+      }
+
+      if (type === 'rating') {
+        const { data: imageUrl } = supabase.storage.from('interact-screenshots').getPublicUrl(storagePath)
+        promptText = await generateRatingPrompt(imageUrl.publicUrl, promptText)
+      }
+      try {
+        translations = await translateQuestion(titles[type], promptText, translatable)
+      } catch (translationError) {
+        console.error('question translation failed', translationError instanceof Error ? translationError.message : translationError)
       }
 
       // Dispatching closes whatever the class was working on — except an open
@@ -1045,7 +1052,7 @@ Deno.serve(async (req) => {
           session_id: sessionId,
           storage_path: storagePath,
           public_url: publicData.publicUrl,
-          ai_status: 'skipped',
+          ai_status: type === 'rating' ? 'success' : 'skipped',
         })
       if (screenshotError) throw screenshotError
 
@@ -1572,7 +1579,7 @@ Deno.serve(async (req) => {
       if (!validUuid(questionId)) return jsonResponse({ message: '題目資料格式不正確。' }, 400)
       const { data: question, error: questionError } = await supabase
         .from('questions')
-        .select('id, allow_multiple, options, status')
+        .select('id, type, allow_multiple, options, status')
         .eq('id', questionId)
         .eq('session_id', sessionId)
         .maybeSingle()
@@ -1582,6 +1589,7 @@ Deno.serve(async (req) => {
       }
 
       const available = new Set(normalizedOptions(question.options))
+      if (question.type === 'rating') return jsonResponse({ message: '評分題沒有標準答案，不需要判定對錯。' }, 400)
       const correctAnswers = normalizedOptions(input.correctAnswers).filter((answer) => available.has(answer))
       const expected = [...correctAnswers].sort()
       const { error: updateQuestionError } = await supabase

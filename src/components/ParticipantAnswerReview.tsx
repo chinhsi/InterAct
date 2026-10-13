@@ -145,7 +145,7 @@ export function ParticipantAnswerReview({ answer, correctValues, locale, questio
       ? display(answer.answer_value)
       : answer.answer_text || ''
   // 投票題 has no right answer, and saying so is better than an empty space.
-  const correct = question.type === 'poll' ? [] : question.correct_answers || []
+  const correct = ['poll', 'rating'].includes(question.type) ? [] : question.correct_answers || []
 
   return (
     <div className="participant-review">
@@ -163,6 +163,7 @@ export function ParticipantAnswerReview({ answer, correctValues, locale, questio
       {question.type === 'poll' && (
         <p className="muted">{english ? 'A poll has no right answer.' : '投票題沒有標準答案。'}</p>
       )}
+      {question.type === 'rating' && <p className="muted">{english ? 'A rating has no right answer.' : '評分題沒有標準答案。'}</p>}
     </div>
   )
 }

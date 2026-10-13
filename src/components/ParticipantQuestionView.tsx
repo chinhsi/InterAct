@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Send } from 'lucide-react'
 import { AudioRecorder } from './AudioRecorder'
+import { RatingAnswer } from './RatingAnswer'
 import { participantText } from '../lib/participantI18n'
 import { answerDeadline, formatSeconds, useSecondsLeft } from '../lib/questionTiming'
 import { HotspotImage } from './HotspotImage'
@@ -15,7 +16,7 @@ type Props = {
   answer: Answer | null
   audioBusy: boolean
   audioResponse: AudioResponse | null
-  onSubmit: (value: string | string[]) => void
+  onSubmit: (value: string | string[]) => void | Promise<void>
   // Ordering and matching are marked server-side against a key the student
   // cannot read, so they take their own path rather than the answers insert.
   onSubmitOrdered: (values: string[]) => Promise<void>
@@ -54,6 +55,7 @@ export function ParticipantQuestionView({ question, answer, audioBusy, audioResp
   const translation = locale === 'en' ? question.translations?.en : undefined
   const englishTypeTitles: Partial<Record<Question['type'], string>> = {
     poll: 'Poll',
+    rating: 'Rating question',
     multiple_choice: 'Multiple-choice question',
     true_false: 'True or false',
     short_answer: 'Short-answer question',
@@ -87,6 +89,7 @@ export function ParticipantQuestionView({ question, answer, audioBusy, audioResp
       {isAudioQuestion && (
         <AudioRecorder busy={audioBusy} locale={locale} question={question} response={audioResponse} onSubmit={onSubmitAudio} />
       )}
+      {question.type === 'rating' && !answer && acceptingAnswers && <RatingAnswer english={locale === 'en'} key={question.id} onSubmit={onSubmit} />}
       {answer && !isAudioQuestion && !['hotspot', 'ordering', 'matching'].includes(question.type) && <p className="success">{participantText(locale, 'submittedAnswer')}{answer.answer_values?.map(displayAnswer).join(locale === 'en' ? ', ' : '、') || (answer.answer_value ? displayAnswer(answer.answer_value) : answer.answer_text)}</p>}
       {answer && question.type === 'hotspot' && (
         <p className="success">{participantText(locale, 'answerSent')}</p>
@@ -192,7 +195,7 @@ export function ParticipantQuestionView({ question, answer, audioBusy, audioResp
           <button disabled={!selectedOptions.length} type="submit"><Send size={18} />{participantText(locale, 'submitAnswer')}</button>
         </form>
       )}
-      {!answer && !isAudioQuestion && acceptingAnswers && !['short_answer', 'hotspot', 'ordering', 'matching'].includes(question.type) && !question.allow_multiple && (
+      {!answer && !isAudioQuestion && acceptingAnswers && !['short_answer', 'hotspot', 'ordering', 'matching', 'rating'].includes(question.type) && !question.allow_multiple && (
         <div className="choice-list">
           {question.options.map((option, index) => (
             <button key={option} type="button" onClick={() => onSubmit(option)}>

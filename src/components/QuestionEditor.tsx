@@ -73,6 +73,7 @@ const questionTypes: Array<{ type: QuestionType; label: string }> = [
   { type: 'hotspot', label: '圖上點選' },
   { type: 'custom_quiz', label: '自訂測驗' },
   { type: 'poll', label: '投票題' },
+  { type: 'rating', label: '評分題' },
   { type: 'multiple_choice', label: '選擇題' },
   { type: 'camera_poll', label: '相機作答' },
   { type: 'drawing', label: '電寫題' },
@@ -150,6 +151,7 @@ export function QuestionEditor({ error, open, previewUrl, onCancel, onCreate, on
 
   const editableOptions = type === 'multiple_choice' || type === 'poll' || type === 'camera_poll'
   const finalOptions = useMemo(() => {
+    if (type === 'rating') return Array.from({ length: 10 }, (_, index) => String(index + 1))
     if (['short_answer', 'send_screen', 'pronunciation', 'oral_response', 'custom_quiz', 'file_upload', 'drawing', 'hotspot'].includes(type)) return []
     return options.map((option) => option.trim()).filter(Boolean)
   }, [options, type])
@@ -284,6 +286,7 @@ export function QuestionEditor({ error, open, previewUrl, onCancel, onCreate, on
             </button>
           ))}
         </div>
+        {type === 'rating' && <p className="muted">固定 1～10 分，學生點選後送出。AI 會依截圖與下方題目辨識評分對象；本題沒有標準答案。</p>}
         {editableOptions && type !== 'camera_poll' && (
           <div className="option-editor">
             <label className="multi-select-setting">

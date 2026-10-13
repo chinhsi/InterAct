@@ -1,6 +1,7 @@
 import { callAiJson, corsHeaders, jsonResponse, parseThinkingLevel, errorDetail } from '../_shared/ai.ts'
 import { getAdminClient, hashPresenterToken } from '../_shared/supabase.ts'
 import { isOwner, ownerKeyConfigured, ownerRefusalMessage } from '../_shared/owner.ts'
+import { ratingStats } from '../_shared/rating.ts'
 
 const sessionAnalysisCoreSchema = {
   type: 'object',
@@ -147,7 +148,7 @@ Deno.serve(async (req) => {
       supabase.from('shared_contents').select('body, url, created_at').eq('session_id', sessionId).order('created_at').limit(1000),
       supabase.from('caption_segments').select('language, source_language, text, is_translation, created_at').eq('session_id', sessionId).order('created_at').limit(10000),
       supabase.from('questions').select('*').eq('session_id', sessionId).order('created_at').limit(500),
-      supabase.from('answers').select('question_id, participant_id, answer_value, answer_values, answer_text, is_correct').eq('session_id', sessionId).order('submitted_at').limit(10000),
+      supabase.from('answers').select('question_id, participant_id, answer_value, answer_values, answer_text, is_correct, round').eq('session_id', sessionId).order('submitted_at').limit(10000),
       supabase.from('board_posts').select('question_id, participant_id, kind, body, url, reply_to, deleted_at, hidden_at').eq('session_id', sessionId).order('created_at').limit(5000),
       supabase.from('audio_responses').select('question_id, analysis_status, detected_language, transcript, score, analysis_json, submitted_at').eq('session_id', sessionId).order('submitted_at').limit(10000),
       supabase.from('file_responses').select('question_id, participant_id, name, mime_type, analysis_status, analysis_json, submitted_at').eq('session_id', sessionId).order('submitted_at').limit(10000),
@@ -295,6 +296,7 @@ Deno.serve(async (req) => {
       return {
         question_id: question.id,
         type: question.type,
+        ...(question.type === 'rating' ? { rating_summary: ratingStats(questionAnswers.filter(answer => answer.round === question.answer_round)), rating_round: question.answer_round, has_correct_answer: false } : {}),
         title: question.title,
         prompt_text: question.prompt_text,
         options: question.options,

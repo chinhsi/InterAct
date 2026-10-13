@@ -1,5 +1,6 @@
 import { corsHeaders, jsonResponse, errorDetail, geminiModels } from '../_shared/ai.ts'
 import { getAdminClient, hashPresenterToken } from '../_shared/supabase.ts'
+import { ratingStats } from '../_shared/rating.ts'
 
 const analysisSchema = {
   type: 'object',
@@ -157,7 +158,7 @@ Deno.serve(async (req) => {
       question.screenshot_id
         ? supabase.from('screenshots').select('public_url').eq('id', question.screenshot_id).single()
         : Promise.resolve({ data: null }),
-      supabase.from('answers').select('answer_value, answer_values, answer_text').eq('question_id', questionId).order('submitted_at'),
+      supabase.from('answers').select('answer_value, answer_values, answer_text, round').eq('question_id', questionId).order('submitted_at'),
       supabase.from('participants').select('id', { count: 'exact', head: true }).eq('session_id', sessionId),
       isSpoken
         ? supabase.from('audio_responses')
@@ -275,6 +276,7 @@ Deno.serve(async (req) => {
 
     summaryInput = {
       question_type: question.type,
+      ...(question.type === 'rating' ? { rating_summary: ratingStats((answers || []).filter(answer => answer.round === question.answer_round)), rating_round: question.answer_round } : {}),
       presenter_question: question.prompt_text,
       options: question.options,
       allow_multiple: question.allow_multiple,
@@ -319,7 +321,9 @@ Deno.serve(async (req) => {
       : '你是 InterAct 的課堂形成性評量分析助理。請以繁體中文分析截圖中的題目與匿名化群體作答。若 presenter_question 有內容，detected_question 應優先忠實使用該題目；若為空，截圖有明確題幹時忠實轉寫或精簡，沒有明顯題幹時依畫面脈絡與選項產生中立、不誘導且不暗示正解的題目。無論是否有 presenter_question，都必須繼續根據截圖、選項及實際作答行為分析理解、證據、常見誤解與教學行動，不可只依題目文字推測。選擇題與是非題只能提出建議答案，最後決定權屬於講者。投票題不判定對錯。'
 
     const requestPayload = {
-        systemInstruction: { parts: [{ text: instruction }] },
+        systemInstruction: { parts: [{ text: question.type === 'rating'
+          ? '你是 InterAct 評分題分析助理。這是 1 到 10 分的主觀評分，沒有標準答案，不要評判個別分數對錯。依 rating_summary 的原始平均、IQR 剔除後平均及分布解讀群體意見與分歧，剔除不是刪除回答，也不要把不同意見說成錯誤。question_understanding.suggested_correct_answer 必須為 null。回傳相同的分析 JSON 結構，並以台灣繁體中文給出適合的後續討論建議。'
+          : instruction }] },
         contents: [{ role: 'user', parts }],
       }
 
@@ -341,6 +345,7 @@ Deno.serve(async (req) => {
     const outputText = extractGeminiText(geminiData)
     if (!outputText) throw new Error('Gemini returned no structured output.')
     const analysis = JSON.parse(outputText)
+    if (question.type === 'rating' && analysis.question_understanding) analysis.question_understanding.suggested_correct_answer = null
 
     const { error: summaryError } = await supabase.from('ai_summaries').insert({
       session_id: sessionId,

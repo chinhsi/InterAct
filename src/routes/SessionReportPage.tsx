@@ -21,6 +21,7 @@ const questionTypeLabels: Record<Question['type'], string> = {
   send_screen: '派送畫面',
   board: '討論板',
   poll: '投票題',
+  rating: '評分題',
   multiple_choice: '選擇題',
   true_false: '是非題',
   short_answer: '問答題',

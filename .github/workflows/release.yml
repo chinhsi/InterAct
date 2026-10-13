@@ -85,6 +85,7 @@ jobs:
           node scripts/test-taskbar-icon.cjs
           node scripts/test-gemini-models.cjs
           node scripts/test-session-removed.cjs
+          node scripts/test-rating-question.cjs
 
       # Deliberately built with no Supabase project configured: whoever downloads
       # this enters their own on first launch. Baking one in would send every

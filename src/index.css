@@ -7382,3 +7382,14 @@ h2 {
   .camera-gesture-editor label, .camera-poll-review > label { grid-template-columns: 1fr; }
   .camera-poll-bar-row { grid-template-columns: minmax(5rem, .8fr) minmax(5rem, 1.5fr) 2.5rem; }
 }
+.rating-scale { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 8px; margin-top: 20px; }
+.rating-scale button { display: flex; justify-content: center; align-items: center; min-width: 0; width: 100%; padding: 12px 4px; min-height: 54px; font-size: 20px; }
+.rating-scale .selected-rating { background: var(--primary, #6157ed); color: white; }
+.rating-endpoints { display: flex; justify-content: space-between; margin: 12px 0 22px; color: #64748b; }
+.rating-summary { display: flex; flex-wrap: wrap; gap: 24px; margin: 18px 0; }
+.rating-summary strong { font-size: 28px; }
+.rating-filter { display: flex; align-items: center; gap: 10px; }
+.rating-filter input { flex: 0 0 20px; width: 20px; height: 20px; }
+.rating-distribution { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
+.rating-distribution > div { display: flex; flex-direction: column; text-align: center; gap: 4px; border: 1px solid #dce1ec; border-radius: 12px; padding: 8px 2px; }
+@media (max-width: 600px) { .rating-scale { grid-template-columns: repeat(5, minmax(0, 1fr)); } }

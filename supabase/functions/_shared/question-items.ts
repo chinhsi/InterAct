@@ -77,6 +77,15 @@ async function ask(sourceUrl: string, direction: string, systemPrompt: string, s
   return JSON.parse(output)
 }
 
+export async function generateRatingPrompt(sourceUrl: string, direction: string) {
+  const output = await ask(sourceUrl, direction,
+    '你是 InterAct 的評分題出題助理。閱讀截圖，產生一個讓學生以 1 到 10 分回答的簡潔評分題目。這是主觀評分，沒有正確答案。若 presenter_direction 已提供完整題目，原文優先保留；若提供出題方向，依方向與圖片出題。不要把圖片中的選擇題變成猜正解，不要編造看不見的內容。沒有明確對象時用「請根據這張圖片的內容評分（1～10分）」。尊重講師指定語言，未指定則用台灣繁體中文。只回傳 JSON title。',
+    { type: 'object', additionalProperties: false, properties: { title: { type: 'string' } }, required: ['title'] })
+  const title = typeof output.title === 'string' ? output.title.trim().slice(0, 1000) : ''
+  if (!title) throw new Error('AI 未回傳評分題目，請稍後重試。')
+  return title
+}
+
 const orderingPrompt = '你是 InterAct 的課堂出題助理。請閱讀截圖，找出畫面裡本來就有順序關係的一組項目 —— 步驟、流程、時序、段落、大小或程度的排列都算 —— 並以繁體中文列出 4 到 8 個項目，**依正確順序排列**。每個項目寫成一句可以獨立看懂的短語，不要編號、不要出現「第一步」這種會直接洩漏答案的字眼，長度盡量一致。若截圖裡沒有任何有順序的內容，items 回傳空陣列，不要勉強編造。presenter_direction 若有內容，優先照它指定的角度出題。'
 
 const matchingPrompt = '你是 InterAct 的課堂出題助理。請閱讀截圖，找出畫面裡成對的概念 —— 詞與義、症狀與診斷、公式與適用情境、人物與事蹟都算 —— 並以繁體中文產生 3 到 6 組配對。left 是題目側（學生看到的固定欄），right 是被選的那一側；每個 right 只能對應一個 left，而且各個 right 之間必須明確不同，不可以出現兩個都說得通的選項。若截圖裡沒有可配對的內容，pairs 回傳空陣列，不要勉強編造。presenter_direction 若有內容，優先照它指定的角度出題。'

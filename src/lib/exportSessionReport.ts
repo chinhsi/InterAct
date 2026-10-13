@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs'
 import type { Participant, QuestionAnalysis, SessionAnalysis, SessionMetrics, SessionReportData } from '../types'
 import { badgeText, buzzerWinsFrom, participationRows } from './participation'
 import { matchRoster } from './classRoster'
+import { ratingStats } from './rating'
 
 // A sliced 排序題 answers with image URLs. A spreadsheet column of storage paths
 // is unreadable and enormous; the count and the fact it was ordered is the part
@@ -40,6 +41,7 @@ const questionTypeLabels = {
   send_screen: '派送畫面',
   board: '討論板',
   poll: '投票題',
+  rating: '評分題',
   multiple_choice: '選擇題',
   true_false: '是非題',
   short_answer: '問答題',
@@ -378,6 +380,10 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
     { header: '選項', key: 'options', width: 25 },
     { header: '正確答案', key: 'correctAnswer', width: 14 },
     { header: '作答數', key: 'answerCount', width: 12 },
+    { header: '原始平均（評分題）', key: 'ratingAverage', width: 20 },
+    { header: 'IQR 剔除後平均（評分題）', key: 'ratingFilteredAverage', width: 26 },
+    { header: '剔除筆數（評分題）', key: 'ratingExcludedCount', width: 20 },
+    { header: '評分輪次', key: 'ratingRound', width: 12 },
     { header: '作答率', key: 'responseRate', width: 12 },
     { header: '正確率', key: 'correctRate', width: 12 },
     { header: 'AI 理解摘要', key: 'analysis', width: 50 },
@@ -386,6 +392,7 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
   ]
   data.questions.forEach((question, index) => {
     const questionAnswers = data.answers.filter((answer) => answer.question_id === question.id)
+    const rating = question.type === 'rating' ? ratingStats(questionAnswers.filter(answer => answer.round === question.answer_round)) : null
     const assessed = questionAnswers.filter((answer) => answer.is_correct !== null)
     const questionAnalysis = analysisMap.get(question.id)
     const quiz = quizByQuestion.get(question.id)
@@ -416,6 +423,12 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
     }
     questions.addRow({
       number: index + 1,
+      ...(rating ? {
+        ratingAverage: rating.average ?? '',
+        ratingFilteredAverage: rating.filteredAverage ?? '',
+        ratingExcludedCount: rating.excludedCount,
+        ratingRound: question.answer_round,
+      } : {}),
       type: questionTypeLabels[question.type],
       title: questionAnalysis?.question_understanding.detected_question || question.prompt_text || question.title,
       status: question.status,

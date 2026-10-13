@@ -89,7 +89,7 @@ export type Screenshot = {
   created_at: string
 }
 
-export type QuestionType = 'send_screen' | 'poll' | 'multiple_choice' | 'true_false' | 'short_answer' | 'pronunciation' | 'oral_response' | 'custom_quiz' | 'file_upload' | 'drawing' | 'hotspot' | 'ordering' | 'matching' | 'board' | 'camera_poll'
+export type QuestionType = 'send_screen' | 'poll' | 'rating' | 'multiple_choice' | 'true_false' | 'short_answer' | 'pronunciation' | 'oral_response' | 'custom_quiz' | 'file_upload' | 'drawing' | 'hotspot' | 'ordering' | 'matching' | 'board' | 'camera_poll'
 
 export type CameraPollResult = {
   counts: number[]

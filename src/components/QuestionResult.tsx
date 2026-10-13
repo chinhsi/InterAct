@@ -16,6 +16,7 @@ import { HotspotImage } from './HotspotImage'
 import { parsePins, pinColor, pinLabel } from '../lib/hotspot'
 import { QuestionStopControl } from './QuestionStopControl'
 import { TimingRow } from './TimingRow'
+import { RatingResult } from './RatingResult'
 import { MatchingBoard } from './MatchingBoard'
 import { SortableList } from './SortableList'
 import type { Answer, AudioResponse, BoardPostKind, FileResponse, Question, QuestionAnalysis } from '../types'
@@ -119,7 +120,7 @@ function QuestionStatusActions({
         busy={busy}
         isCurrentQuestion={isCurrentQuestion}
         question={question}
-        canRepeat={['poll', 'multiple_choice', 'true_false', 'short_answer', 'hotspot', 'ordering', 'matching'].includes(question.type)}
+        canRepeat={['poll', 'rating', 'multiple_choice', 'true_false', 'short_answer', 'hotspot', 'ordering', 'matching'].includes(question.type)}
         onNextRound={onNextRound}
         onRecall={() => onRecallQuestion(question.id)}
         onResume={onResumeQuestion}
@@ -892,6 +893,14 @@ export function QuestionResult(props: Props) {
   }
 
   if (question.type === 'board') return <BoardResults {...props} question={question} />
+
+  if (question.type === 'rating') return <>
+    <section className="panel result-panel">
+      <div className="panel-heading"><h2>評分題</h2><QuestionStatusActions {...props} question={question} /></div>
+      <RatingResult answers={answers} key={question.id} question={question} />
+    </section>
+    <AiAnalysisPanel {...props} />
+  </>
 
   if (question.type === 'short_answer') {
     return (

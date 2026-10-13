@@ -96,7 +96,7 @@ create table if not exists public.questions (
   id uuid primary key default gen_random_uuid(),
   session_id uuid not null references public.sessions(id) on delete cascade,
   screenshot_id uuid null references public.screenshots(id) on delete set null,
-  type text not null check (type in ('send_screen', 'poll', 'multiple_choice', 'true_false', 'short_answer', 'pronunciation', 'oral_response', 'custom_quiz', 'file_upload', 'drawing', 'hotspot', 'ordering', 'matching', 'board', 'camera_poll')),
+  type text not null check (type in ('send_screen', 'poll', 'rating', 'multiple_choice', 'true_false', 'short_answer', 'pronunciation', 'oral_response', 'custom_quiz', 'file_upload', 'drawing', 'hotspot', 'ordering', 'matching', 'board', 'camera_poll')),
   status text not null default 'active' check (status in ('draft', 'active', 'stopped', 'closed')),
   title text not null default '',
   prompt_text text null,
@@ -179,8 +179,16 @@ alter table public.questions
   add constraint questions_type_check check (type in (
     'send_screen', 'poll', 'multiple_choice', 'true_false', 'short_answer',
     'pronunciation', 'oral_response', 'custom_quiz', 'file_upload', 'drawing',
-    'hotspot', 'ordering', 'matching', 'board', 'camera_poll'
+    'hotspot', 'ordering', 'matching', 'board', 'camera_poll', 'rating'
   ));
+
+alter table public.questions drop constraint if exists questions_rating_shape_check;
+alter table public.questions add constraint questions_rating_shape_check check (
+  type <> 'rating' or (
+    options = '["1","2","3","4","5","6","7","8","9","10"]'::jsonb
+    and not allow_multiple and correct_answer is null and cardinality(correct_answers) = 0
+  )
+);
 
 alter table public.questions drop constraint if exists questions_camera_result_check;
 alter table public.questions add constraint questions_camera_result_check check (
@@ -821,6 +829,13 @@ using (
 drop policy if exists "mvp read answers" on public.answers;
 create policy "mvp read answers" on public.answers for select using (true);
 drop policy if exists "answer active questions" on public.answers;
+drop policy if exists "valid rating answers" on public.answers;
+create policy "valid rating answers" on public.answers as restrictive for insert
+to anon, authenticated with check (
+  not exists (select 1 from public.questions where questions.id = answers.question_id and questions.type = 'rating')
+  or (answer_value in ('1','2','3','4','5','6','7','8','9','10')
+    and answer_values is null and answer_text is null and is_correct is null)
+);
 create policy "answer active questions" on public.answers for insert
 to anon, authenticated
 with check (
