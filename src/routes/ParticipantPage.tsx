@@ -119,8 +119,19 @@ export function ParticipantPage() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [sessionChecked, setSessionChecked] = useState(false)
+  const sessionGone = sessionChecked && !session
   const [locale, setLocale] = useState<ParticipantLocale>(participantLocaleFromStorage)
   const loadSequence = useRef(0)
+  const goneSessionId = useRef('')
+  const markSessionGone = useCallback(() => {
+    goneSessionId.current = sessionId
+    loadSequence.current++
+    setSession(null)
+    setSessionChecked(true)
+    setParticipant(null)
+    setQuestion(null)
+    setQuizData(null)
+  }, [sessionId])
   const coalescedLoad = useRef(createCoalescedLoader())
   const loadedQuizQuestionId = useRef('')
   const navigate = useNavigate()
@@ -161,12 +172,12 @@ export function ParticipantPage() {
   }
 
   const loadAll = useCallback(() => coalescedLoad.current(async () => {
-    if (!isSupabaseConfigured || !sessionId || !participantId || navigator.onLine === false) return
+    if (!isSupabaseConfigured || !sessionId || !participantId || goneSessionId.current === sessionId || navigator.onLine === false) return
     const requestId = ++loadSequence.current
     const participantReadRevision = participantRevision.current.current()
     const supabase = requireSupabase()
     const initial = await Promise.all([
-      supabase.from('sessions').select('*').eq('id', sessionId).single(),
+      supabase.from('sessions').select('*').eq('id', sessionId).maybeSingle(),
       supabase.from('participants').select('*').eq('id', participantId).single(),
       supabase.from('exit_tickets').select('*').eq('session_id', sessionId).eq('participant_id', participantId).maybeSingle(),
       supabase.from('shared_contents').select('*').eq('session_id', sessionId).order('created_at', { ascending: false }),
@@ -174,6 +185,10 @@ export function ParticipantPage() {
       supabase.from('questions').select('*').eq('session_id', sessionId).order('created_at'),
       supabase.from('answers').select('*').eq('session_id', sessionId).eq('participant_id', participantId).order('submitted_at'),
     ])
+    if (requestId !== loadSequence.current || goneSessionId.current === sessionId) return
+    // A successful empty session read means it is gone. Cascaded participant
+    // reads may fail too, but must not hide this result behind the error guard.
+    if (!initial[0].error && !initial[0].data) { markSessionGone(); return }
     if (initial.some((result) => result.error)) return
     const [{ data: sessionData }, { data: participantData }, { data: exitTicketData }, { data: sharedContentData }, { data: buzzerData }, { data: allQuestions }, { data: allAnswers }] = initial
     if (requestId !== loadSequence.current) return
@@ -335,7 +350,7 @@ export function ParticipantPage() {
       setBoardQuestion(null)
       setBoardImageUrl(null)
     }
-  }), [locale, participantId, participantToken, sessionId])
+  }), [locale, markSessionGone, participantId, participantToken, sessionId])
 
   const loadHistoryDetails = useCallback(async (historyQuestion: Question) => {
     if (!participantId || !participantToken) return
@@ -468,11 +483,24 @@ export function ParticipantPage() {
   }, [])
 
   useEffect(() => {
+    if (!isSupabaseConfigured || !pageVisible || !sessionId || sessionGone) return
+    const supabase = requireSupabase()
+    // Keep lifecycle events after class ends. DELETE cannot rely on a row
+    // filter unless replica identity is FULL; match its primary key locally.
+    const channel = supabase.channel(`participant-session:${sessionId}:${participantId}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, scheduleLoad)
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'sessions' }, payload => {
+        if (payload.old?.id === sessionId) markSessionGone()
+      })
+      .subscribe(status => { if (status === 'SUBSCRIBED') scheduleLoad() })
+    return () => { void supabase.removeChannel(channel) }
+  }, [markSessionGone, pageVisible, participantId, scheduleLoad, sessionGone, sessionId])
+
+  useEffect(() => {
     if (!isSupabaseConfigured || !liveSessionId || !participantId) return
     const supabase = requireSupabase()
     const channel = supabase
       .channel(`participant:${sessionId}:${participantId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, scheduleLoad)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'questions', filter: `session_id=eq.${sessionId}` }, scheduleLoad)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'answers', filter: `participant_id=eq.${participantId}` }, scheduleLoad)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'screenshots', filter: `session_id=eq.${sessionId}` }, scheduleLoad)
