@@ -1,4 +1,4 @@
-import { corsHeaders, jsonResponse, errorDetail } from '../_shared/ai.ts'
+import { corsHeaders, jsonResponse, errorDetail, geminiModels } from '../_shared/ai.ts'
 import { getAdminClient, hashPresenterToken } from '../_shared/supabase.ts'
 
 const analysisSchema = {
@@ -298,8 +298,6 @@ Deno.serve(async (req) => {
     }
 
     const geminiKey = Deno.env.get('GEMINI_API_KEY')
-    const realtimeModel = Deno.env.get('GEMINI_REALTIME_MODEL') || 'gemini-3.6-flash'
-    const fallbackModel = Deno.env.get('GEMINI_REALTIME_FALLBACK_MODEL') || 'gemini-3.5-flash'
     if (!geminiKey) return jsonResponse({ message: 'Supabase 尚未設定 GEMINI_API_KEY。' }, 503)
 
     const parts: Array<Record<string, unknown>> = [{ text: JSON.stringify(summaryInput) }]
@@ -336,7 +334,7 @@ Deno.serve(async (req) => {
       return JSON.stringify({ ...requestPayload, generationConfig })
     }
 
-    const models = fallbackModel === realtimeModel ? [realtimeModel] : [realtimeModel, fallbackModel]
+    const models = geminiModels('realtime')
     const geminiResponse = await requestAnalysis(geminiKey, models, requestBodyForModel())
 
     const geminiData = await geminiResponse.json()

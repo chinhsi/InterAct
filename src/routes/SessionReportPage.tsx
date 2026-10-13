@@ -12,9 +12,9 @@ const PAGE_SIZE = 1000
 type ReportThinkingLevel = 'LOW' | 'MEDIUM' | 'HIGH'
 
 const reportModes: { level: ReportThinkingLevel; label: string; hint: string }[] = [
-  { level: 'LOW', label: '快速', hint: 'gemini-3.7-flash · thinking low：最不容易逾時，建議先用這個' },
-  { level: 'MEDIUM', label: '標準', hint: 'gemini-3.7-flash · thinking medium：分析較深入，較慢' },
-  { level: 'HIGH', label: '深入', hint: 'gemini-3.7-flash · thinking high：最深入，最可能逾時' },
+  { level: 'LOW', label: '快速', hint: 'gemini-3.8-flash · thinking low：最不容易逾時，建議先用這個' },
+  { level: 'MEDIUM', label: '標準', hint: 'gemini-3.8-flash · thinking medium：分析較深入，較慢' },
+  { level: 'HIGH', label: '深入', hint: 'gemini-3.8-flash · thinking high：最深入，最可能逾時' },
 ]
 
 const questionTypeLabels: Record<Question['type'], string> = {
