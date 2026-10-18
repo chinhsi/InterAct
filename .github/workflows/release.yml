@@ -86,6 +86,8 @@ jobs:
           node scripts/test-gemini-models.cjs
           node scripts/test-session-removed.cjs
           node scripts/test-rating-question.cjs
+          node scripts/test-dispatch-navigation.cjs
+          node scripts/test-error-recovery.cjs
 
       # Deliberately built with no Supabase project configured: whoever downloads
       # this enters their own on first launch. Baking one in would send every
@@ -314,8 +316,8 @@ jobs:
 
           ## 注意
 
-          私人 GitHub repository 的 Pages 需要支援該功能的 GitHub 方案；
-          發布桌面版不會自動恢復已停用的學員網站。請確認學員網址可以公開存取。
+          官方學員網站由 Cloudflare 託管；GitHub repository 設為私人不影響學員使用。
+          自行部署時，請確認你設定的學員網址可以公開存取。
 
           Windows 的執行檔同樣未經程式碼簽章，SmartScreen 可能顯示「不明發行者」，
           請點「其他資訊 → 仍要執行」。部分公司電腦的資安政策可能直接封鎖。

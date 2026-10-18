@@ -45,7 +45,8 @@ For a new self-hosted deployment, follow `skills/interact-self-deploy/SKILL.md` 
 The user has explicitly requested desktop builds, overriding the original
 web-only restriction above. Keep the working development checkout in
 `E:/codex/InterAct`. Maintain the complete, runnable Windows app folder at
-`E:/ViewSonic Dropbox/Yujen Lien/InterAct/interact` for local testing.
+`E:/codex/InterAct/interact` for local testing. Never put local app builds in
+Dropbox; the user explicitly corrected the old workspace path.
 Apply and verify changes there first. Do not create or publish a new release,
 move a release tag, or replace release assets until the user explicitly approves
 the tested changes. Preserve the local app's `.env` and `InterAct.config.json`

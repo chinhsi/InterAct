@@ -62,8 +62,11 @@ async function main() {
 
   failed = true
   let logged = 0
+  const focusModule = { exports: {} }
+  vm.runInNewContext(compile(fs.readFileSync('src/lib/presenterQuestionFocus.ts', 'utf8')), focusModule)
   const presenter = {
     ...context, navigator: { onLine: true }, selectedQuestionId: '',
+    questionFocus: focusModule.exports.createPresenterQuestionFocus('class'),
     reload: { current: fn => fn() }, logDiagnostic: () => logged++,
   }
   const loadPresenter = callable('src/routes/PresenterPage.tsx', 'loadAll', presenter)

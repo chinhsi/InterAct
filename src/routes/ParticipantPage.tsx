@@ -50,6 +50,11 @@ async function participantFunctionMessage(error: unknown, fallback: string) {
   return fallback
 }
 
+function quizLoadCanRetry(error: unknown) {
+  const status = (error as { context?: { status?: number } } | null)?.context?.status
+  return !status || status === 408 || status === 429 || status >= 500
+}
+
 export function ParticipantPage() {
   const { sessionId = '' } = useParams()
   const participantId = localStorage.getItem(`interact_participant_${sessionId}`)
@@ -93,6 +98,7 @@ export function ParticipantPage() {
   const [quizBusy, setQuizBusy] = useState(false)
   const [orderedBusy, setOrderedBusy] = useState(false)
   const [quizLoadError, setQuizLoadError] = useState('')
+  const [quizLoadRetryable, setQuizLoadRetryable] = useState(true)
   const [screenshot, setScreenshot] = useState<Screenshot | null>(null)
   // The open 討論板, which outlives the question the class is currently on.
   const [boardQuestion, setBoardQuestion] = useState<Question | null>(null)
@@ -290,7 +296,9 @@ export function ParticipantPage() {
         })
         if (requestId !== loadSequence.current) return
         if (quizError) {
-          setQuizData(null)
+          // Keep an already loaded form mounted: a transient refresh failure
+          // must not discard the student's unfinished answers.
+          setQuizLoadRetryable(quizLoadCanRetry(quizError))
           setQuizLoadError(await participantFunctionMessage(
             quizError,
             locale === 'en' ? 'Unable to load this quiz. Please refresh or scan the QR code again.' : '無法載入測驗，請重新整理；若仍無法顯示，請重新掃描 QR Code 加入。',
@@ -451,10 +459,12 @@ export function ParticipantPage() {
   }, [loadAll, pageVisible, quizData?.attempt?.status])
 
   useEffect(() => {
-    if (!liveSessionId || question?.type !== 'custom_quiz' || quizData || quizLoadError) return
-    const timer = window.setInterval(() => void loadAll(), 1500)
+    if (!pageVisible || !liveSessionId || !participantToken || question?.type !== 'custom_quiz' || quizData || (quizLoadError && !quizLoadRetryable)) return
+    const timer = window.setInterval(() => {
+      if (navigator.onLine !== false) void loadAll()
+    }, quizLoadError ? 10_000 : 1500)
     return () => window.clearInterval(timer)
-  }, [loadAll, liveSessionId, question?.type, quizData, quizLoadError])
+  }, [loadAll, liveSessionId, pageVisible, participantToken, question?.type, quizData, quizLoadError, quizLoadRetryable])
 
   // Dispatching one question writes a screenshot, a question and the session
   // row, so every student page used to run its seven queries three times over.

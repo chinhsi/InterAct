@@ -653,6 +653,7 @@ Deno.serve(async (req) => {
       const { error: stopError } = await supabase.from('questions')
         .update({ status: 'stopped', stopped_at: stoppedAt })
         .eq('session_id', sessionId).eq('status', 'active')
+        .neq('type', 'board')
       if (stopError) throw stopError
 
       // Only a screenshot-sourced quiz has a screenshot to record; a file-sourced

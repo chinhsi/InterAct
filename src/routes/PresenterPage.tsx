@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPresenterQuestionFocus } from '../lib/presenterQuestionFocus'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { PresenterControlPanel } from '../components/PresenterControlPanel'
@@ -93,6 +94,7 @@ export function PresenterPage() {
   const [questions, setQuestions] = useState<Question[]>([])
   const [answerCounts, setAnswerCounts] = useState<Record<string, number>>({})
   const [selectedQuestionId, setSelectedQuestionId] = useState<string | null>(null)
+  const questionFocus = useMemo(() => createPresenterQuestionFocus(sessionId), [sessionId])
   const [question, setQuestion] = useState<Question | null>(null)
   const [answers, setAnswers] = useState<Answer[]>([])
   const [audioResponses, setAudioResponses] = useState<AudioResponse[]>([])
@@ -271,6 +273,7 @@ export function PresenterPage() {
   const reload = useRef(createCoalescedLoader())
   const loadAll = useCallback(() => reload.current(async () => {
     if (!isSupabaseConfigured || !sessionId || navigator.onLine === false) return
+    const snapshot = questionFocus.snapshot()
     try {
 
     const supabase = requireSupabase()
@@ -288,6 +291,8 @@ export function PresenterPage() {
 
     const nextSession = sessionData as Session | null
     const nextQuestions = (questionListData || []) as Question[]
+    const focus = questionFocus.reconcile(snapshot, nextSession?.current_question_id || null, nextQuestions.map(item => item.id))
+    if (!focus) return
     setSession(nextSession)
     setParticipants((participantData || []) as Participant[])
     setQuestions(nextQuestions)
@@ -299,10 +304,7 @@ export function PresenterPage() {
     for (const item of nextQuestions) if (item.type === 'camera_poll' && item.camera_result) nextAnswerCounts[item.id] = item.camera_result.totalDetected
     setAnswerCounts(nextAnswerCounts)
 
-    const selectedStillExists = selectedQuestionId && nextQuestions.some((item) => item.id === selectedQuestionId)
-    const targetQuestionId = selectedStillExists
-      ? selectedQuestionId
-      : nextSession?.current_question_id || nextQuestions.at(-1)?.id || null
+    const targetQuestionId = focus.questionId
 
     if (targetQuestionId) {
       const detail = await Promise.all([
@@ -320,8 +322,9 @@ export function PresenterPage() {
       ])
       const detailError = detail.find((result) => result.error)?.error
       if (detailError) throw detailError
+      if (!questionFocus.accepts(snapshot)) return
       const [{ data: questionData }, { data: answerData }, { data: summaryData }] = detail
-      if (targetQuestionId !== selectedQuestionId) setSelectedQuestionId(targetQuestionId)
+      setSelectedQuestionId(targetQuestionId)
       setQuestion(questionData as Question | null)
       setAnswers((answerData || []) as Answer[])
       setAnalysis(((summaryData as AiSummary | null)?.output_json as QuestionAnalysis | undefined) || null)
@@ -333,6 +336,7 @@ export function PresenterPage() {
             body: { action: 'get_custom_quiz_results', sessionId, presenterToken, questionId: targetQuestionId },
           })
           if (quizError) throw quizError
+          if (!questionFocus.accepts(snapshot)) return
           setQuizResults((quizData as PresenterQuizResults | null) || null)
         }
         setAudioResponses([])
@@ -348,6 +352,7 @@ export function PresenterPage() {
           // the player the presenter is listening to jumps back to the start.
           // The URL that is already playing stays; only the rest is taken.
           const nextResponses = (recordingData?.responses || []) as AudioResponse[]
+          if (!questionFocus.accepts(snapshot)) return
           setAudioResponses((current) => {
             const playing = new Map(current.map((item) => [item.id, item.signed_url]))
             return nextResponses.map((item) => {
@@ -371,7 +376,7 @@ export function PresenterPage() {
       logDiagnostic('presenter_reload_failed', { message: error instanceof Error ? error.message : String(error) })
       // Keep the last successful classroom snapshot while reconnecting.
     }
-  }), [selectedQuestionId, sessionId])
+  }), [questionFocus, sessionId])
 
   // A whole class answering at once is 145 INSERTs in a couple of seconds, and
   // every one of them used to mean another full reload. They all want the same
@@ -1066,7 +1071,7 @@ export function PresenterPage() {
       })
       if (error) throw new Error(await edgeFunctionErrorMessage(error, '截圖派題失敗。'))
       if (!data?.question) throw new Error(data?.message || '建立題目失敗。')
-      setSelectedQuestionId(data.question.id)
+      showDispatchedQuestion(data.question as Question)
     } finally {
       setBusy(false)
     }
@@ -1128,7 +1133,7 @@ export function PresenterPage() {
     canvas.height = Math.max(1, Math.round(rect.height * scaleY))
 
     const context = canvas.getContext('2d')
-    if (!context) return
+    if (!context) throw new Error('無法建立截圖畫布，請重新截圖。')
 
     context.drawImage(
       image,
@@ -1188,14 +1193,19 @@ export function PresenterPage() {
     setSelectionRect(rect)
   }
 
-  function cancelSelection() {
+  async function cancelSelection() {
     activeSelectionPointerId.current = null
     selectionStartRef.current = null
     selectionRectRef.current = null
     setSelectionMode(false)
     setCaptureSource(null)
     setSelectionRect(null)
-    window.interactDesktop?.finishCaptureSelection(false)
+    try {
+      await window.interactDesktop?.finishCaptureSelection(true)
+    } catch (error) {
+      logDiagnostic('capture_restore_failed', { message: String(error) })
+    }
+    returnToClassView()
   }
 
   function finishSelection(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1212,12 +1222,17 @@ export function PresenterPage() {
     }
 
     if (rect.width < 16 || rect.height < 16) {
-      cancelSelection()
+      void cancelSelection()
       return
     }
 
     setSelectionRect(rect)
-    cropCapture(rect)
+    void cropCapture(rect).catch(async error => {
+      setCaptureFile(null)
+      setCapturePreviewUrl(null)
+      setAnalysisError(`截圖裁切失敗：${error instanceof Error ? error.message : '請重新截圖。'}`)
+      await cancelSelection()
+    })
   }
 
   // Where every dispatch ends up. Sending something to the class is always
@@ -1230,7 +1245,44 @@ export function PresenterPage() {
     setEditorOpen(false)
     setFileTransferOpen(false)
     setTextDispatchOpen(false)
+    setSettingsOpen(false)
+    setEndClassConfirmOpen(false)
+    setCloseConfirmOpen(false)
     setControlsOpen(true)
+    // React may already hold these flags after a slow dispatch. Still reset
+    // native bounds rather than depend on a state change to run the effect.
+    void window.interactDesktop?.setPresenterExpanded(true, false, false)
+      .catch(error => logDiagnostic('presenter_return_failed', { message: String(error) }))
+  }
+
+  function showDispatchedQuestion(created: Question) {
+    questionFocus.dispatch(created.id)
+    setSelectedQuestionId(created.id)
+    setSession(current => current ? { ...current, current_question_id: created.id,
+      ...(created.type === 'board' ? { board_question_id: created.id } : {}),
+    } : current)
+    setQuestions(current => [
+      ...current.filter(item => item.id !== created.id).map(item => (item.type !== 'board' || created.type === 'board') && item.status === 'active'
+        ? { ...item, status: 'stopped' as const } : item), created,
+    ])
+    setQuestion(created)
+    setAnswers([])
+    setAudioResponses([])
+    setQuizResults(null)
+    setAnalysis(null)
+    setOrderingKey(null)
+    setQuestionScreenshotUrl(null)
+    returnToClassView()
+    void loadAll()
+  }
+
+  function cancelCameraPoll() {
+    localStorage.removeItem(`interact:camera-draft:${sessionId}`)
+    setCameraPollRequest(null)
+    setCameraPollResult(null)
+    setCaptureFile(null)
+    setCapturePreviewUrl(null)
+    returnToClassView()
   }
 
   async function analyzeCameraPoll(imageDataUrl: string) {
@@ -1286,6 +1338,7 @@ export function PresenterPage() {
     if (!cameraPollRequest || !window.interactDesktop) return
     const channel = new BroadcastChannel(`interact:camera-poll:${sessionId}`)
     channel.onmessage = (event) => {
+      if (event.data?.type === 'cancelled') { cancelCameraPoll(); return }
       if (event.data?.type === 'publish' && event.data.result && event.data.request?.type === 'camera_poll') {
         void publishCameraPoll(event.data.result, event.data.request)
       }
@@ -1307,9 +1360,8 @@ export function PresenterPage() {
         localStorage.setItem(`interact:camera-draft:${sessionId}`, JSON.stringify(request))
         try { await window.interactDesktop.openCameraPoll(sessionId) }
         catch (error) {
-          setCameraPollRequest(null)
+          cancelCameraPoll()
           setAnalysisError(error instanceof Error ? error.message : '無法開啟相機作答視窗。')
-          setEditorOpen(true)
         }
       }
       return
@@ -1386,8 +1438,7 @@ export function PresenterPage() {
     if (error) throw new Error(await edgeFunctionErrorMessage(error, '重新派送失敗。'))
     if (!data?.question) throw new Error(data?.message || '重新派送失敗。')
     // The class is on it again, so the panel should be too.
-    setSelectedQuestionId(questionId)
-    await loadAll()
+    showDispatchedQuestion(data.question as Question)
   }
 
   // The same question asked again after the class has argued about it. The
@@ -1761,7 +1812,7 @@ export function PresenterPage() {
     const presenterToken = requirePresenterToken()
     setBusy(true)
     try {
-      await callPresenter({
+      const data = await callPresenter({
         action: 'create_custom_quiz',
         sessionId,
         presenterToken,
@@ -1770,7 +1821,8 @@ export function PresenterPage() {
         requestedCount: settings.requestedCount,
         requestedType: settings.requestedType,
       }, 'AI 出題失敗。')
-      returnToClassView()
+      if (!data?.question) throw new Error('AI 未回傳已建立的題目。')
+      showDispatchedQuestion(data.question as Question)
     } finally {
       setBusy(false)
     }
@@ -1884,7 +1936,8 @@ export function PresenterPage() {
         action: 'create_file_request', sessionId, presenterToken, promptText,
       }, '無法派送檔案上傳。')
       setCollectQuestion(data.question as Question)
-      returnToClassView()
+      if (!data?.question) throw new Error('未回傳上傳作答題目。')
+      showDispatchedQuestion(data.question as Question)
       setFileResponses([])
       await loadAll()
     } finally {
@@ -2022,7 +2075,9 @@ export function PresenterPage() {
 
   function selectQuestion(questionId: string) {
     setAnalysisError('')
+    questionFocus.select(questionId)
     setSelectedQuestionId(questionId)
+    void loadAll()
   }
 
   if (!session) {
@@ -2197,9 +2252,7 @@ export function PresenterPage() {
         onAnalyze={(imageDataUrl) => void analyzeCameraPoll(imageDataUrl)}
         onCancel={() => {
           if (busy) return
-          setCameraPollRequest(null)
-          setCameraPollResult(null)
-          setEditorOpen(true)
+          cancelCameraPoll()
         }}
         onPublish={(result) => void publishCameraPoll(result)}
         onResultChange={setCameraPollResult}

@@ -66,7 +66,12 @@ export function CameraPollPage() {
     <CameraPollCaptureModal
       open nativeWindow busy={busy} cameraId={cameraId} error={error} posterMode={preset === 'poster'} onCameraReady={() => void refreshCameras()}
       options={draft.options} gestureMap={draft.cameraGestureMap} result={result}
-      onAnalyze={(image) => void analyze(image)} onCancel={() => void window.interactDesktop?.close()} onResultChange={setResult}
+      onAnalyze={(image) => void analyze(image)} onCancel={() => {
+        const channel = new BroadcastChannel(`interact:camera-poll:${sessionId}`)
+        channel.postMessage({ type: 'cancelled' })
+        channel.close()
+        void window.interactDesktop?.close()
+      }} onResultChange={setResult}
       onPublish={(approved) => {
         setBusy(true)
         const channel = new BroadcastChannel(`interact:camera-poll:${sessionId}`)
