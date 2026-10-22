@@ -76,7 +76,7 @@ export function trackParticipantPresence({ sessionId, participantId, participant
     void send()
   }
 
-  const timer = window.setInterval(() => { if (!stopped && document.visibilityState !== 'hidden') void send() }, HEARTBEAT_MS)
+  const timer = window.setInterval(() => { if (!stopped && document.visibilityState !== 'hidden') void send() }, HEARTBEAT_MS + Math.random() * 10_000)
   const onPageHide = () => { if (!stopped) void send(true) }
   document.addEventListener('visibilitychange', onVisibility)
   window.addEventListener('pagehide', onPageHide)

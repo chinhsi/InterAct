@@ -167,7 +167,7 @@ async function main() {
     let resolveRequest
     const revision = helpers.createRevisionGuard()
     const context = { participant: { id: 'p0', hand_raised_at: null }, participantId: 'p0', participantToken: 'fixture', sessionId: 'class', handBusy: false,
-      participantRevision: { current: revision }, Date,
+      participantRevision: { current: revision }, Date, handMutation: { current: false }, readCache: { current: { invalidate() {} } },
       setHandBusy: value => { context.handBusy = value },
       setParticipant: update => { context.participant = update(context.participant) },
       requireSupabase: () => ({ functions: { invoke: () => new Promise(resolve => { resolveRequest = resolve }) } }),

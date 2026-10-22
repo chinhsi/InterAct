@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { classroomRetryDelay, createClassroomReadCache } from '../lib/classroomReadCache'
 import type { FormEvent } from 'react'
 import { BookOpen, Coffee, Hand, PartyPopper, Send, Sparkles, Waves } from 'lucide-react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
@@ -61,6 +62,8 @@ export function ParticipantPage() {
   const participantToken = localStorage.getItem(`interact_participant_token_${sessionId}`)
   const [participant, setParticipant] = useState<Participant | null>(null)
   const participantRevision = useRef(createRevisionGuard())
+  const handMutation = useRef(false)
+  const readCache = useRef(createClassroomReadCache())
   const participantRef = useRef(participant)
   participantRef.current = participant
   const ownRowLoader = useRef(createCoalescedLoader())
@@ -76,7 +79,8 @@ export function ParticipantPage() {
     if (!isSupabaseConfigured || !participantId || !sessionId || navigator.onLine === false || document.visibilityState === 'hidden') return
     const revision = participantRevision.current.current()
     const { data, error } = await requireSupabase().from('participants').select('*').eq('id', participantId).eq('session_id', sessionId).maybeSingle()
-    if (error || !data || !participantRevision.current.accepts(revision)) return
+    if (error || !data || handMutation.current || !participantRevision.current.accepts(revision)) return
+    readCache.current.invalidate('participants')
     participantRevision.current.changed()
     setParticipant(data as Participant)
   }), [participantId, sessionId])
@@ -123,6 +127,8 @@ export function ParticipantPage() {
   const [buzzerBusy, setBuzzerBusy] = useState(false)
   const [exitTicketBusy, setExitTicketBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [messageBusy, setMessageBusy] = useState(false)
+  const messageSending = useRef(false)
   const [error, setError] = useState('')
   const [sessionChecked, setSessionChecked] = useState(false)
   const sessionGone = sessionChecked && !session
@@ -163,7 +169,8 @@ export function ParticipantPage() {
     return trackParticipantPresence({ sessionId, participantId: participant.id, participantToken,
       captureRevision: participantRevision.current.current,
       onParticipantState: (state, revision) => {
-        if (state.session_id !== sessionId || !participantRevision.current.accepts(revision)) return
+        if (state.session_id !== sessionId || handMutation.current || !participantRevision.current.accepts(revision)) return
+        readCache.current.invalidate('participants')
         participantRevision.current.changed()
         setParticipant(current => current ? { ...current, ...state } : current)
       },
@@ -182,14 +189,17 @@ export function ParticipantPage() {
     const requestId = ++loadSequence.current
     const participantReadRevision = participantRevision.current.current()
     const supabase = requireSupabase()
+    const cache = readCache.current
+    cache.scope(JSON.stringify([sessionId, participantId, participantToken, locale]))
+    const read = cache.read.bind(cache)
     const initial = await Promise.all([
-      supabase.from('sessions').select('*').eq('id', sessionId).maybeSingle(),
-      supabase.from('participants').select('*').eq('id', participantId).single(),
-      supabase.from('exit_tickets').select('*').eq('session_id', sessionId).eq('participant_id', participantId).maybeSingle(),
-      supabase.from('shared_contents').select('*').eq('session_id', sessionId).order('created_at', { ascending: false }),
-      supabase.from('session_events').select('*').eq('session_id', sessionId).eq('event_type', 'buzzer').order('created_at', { ascending: false }).limit(1).maybeSingle(),
-      supabase.from('questions').select('*').eq('session_id', sessionId).order('created_at'),
-      supabase.from('answers').select('*').eq('session_id', sessionId).eq('participant_id', participantId).order('submitted_at'),
+      read('sessions', () => supabase.from('sessions').select('*').eq('id', sessionId).maybeSingle(), 15_000),
+      read('participants', () => supabase.from('participants').select('*').eq('id', participantId).single(), 30_000),
+      read('exit_tickets', () => supabase.from('exit_tickets').select('*').eq('session_id', sessionId).eq('participant_id', participantId).maybeSingle()),
+      read('shared_contents', () => supabase.from('shared_contents').select('*').eq('session_id', sessionId).order('created_at', { ascending: false })),
+      read('session_events', () => supabase.from('session_events').select('*').eq('session_id', sessionId).eq('event_type', 'buzzer').order('created_at', { ascending: false }).limit(1).maybeSingle()),
+      read('questions', () => supabase.from('questions').select('*').eq('session_id', sessionId).order('created_at')),
+      read('answers', () => supabase.from('answers').select('*').eq('session_id', sessionId).eq('participant_id', participantId).order('submitted_at'), 30_000),
     ])
     if (requestId !== loadSequence.current || goneSessionId.current === sessionId) return
     // A successful empty session read means it is gone. Cascaded participant
@@ -201,7 +211,7 @@ export function ParticipantPage() {
     const nextSession = sessionData as Session | null
     setSession(nextSession)
     setSessionChecked(true)
-    if (participantRevision.current.accepts(participantReadRevision)) setParticipant(participantData as Participant | null)
+    if (!handMutation.current && participantRevision.current.accepts(participantReadRevision)) setParticipant(participantData as Participant | null)
     setExitTicket((exitTicketData as ExitTicket | null) || null)
     setSharedContents((sharedContentData || []) as SharedContent[])
     setBuzzerEvent((buzzerData as BuzzerSessionEvent | null) || null)
@@ -213,7 +223,7 @@ export function ParticipantPage() {
 
     const screenshotIds = [...new Set(answeredQuestions.map((item) => item.screenshot_id).filter((id): id is string => Boolean(id)))]
     if (screenshotIds.length) {
-      const { data: historyScreenshotData } = await supabase.from('screenshots').select('*').in('id', screenshotIds)
+      const { data: historyScreenshotData } = await read(`screenshots:history:${JSON.stringify(screenshotIds)}`, () => supabase.from('screenshots').select('*').in('id', screenshotIds))
       if (requestId !== loadSequence.current) return
       setHistoryScreenshots(Object.fromEntries(((historyScreenshotData || []) as Screenshot[]).map((item) => [item.id, item])))
     } else {
@@ -221,7 +231,7 @@ export function ParticipantPage() {
     }
 
     if (nextSession?.status === 'ended') {
-      const { data: summaryData } = await supabase
+      const { data: summaryData } = await read('ai_summaries:session', () => supabase
         .from('ai_summaries')
         .select('*')
         .eq('session_id', sessionId)
@@ -229,7 +239,7 @@ export function ParticipantPage() {
         .eq('status', 'success')
         .order('created_at', { ascending: false })
         .limit(1)
-        .maybeSingle()
+        .maybeSingle())
       setSessionSummary(((summaryData as AiSummary | null)?.output_json as SessionAnalysis | undefined) || null)
     } else {
       setSessionSummary(null)
@@ -242,14 +252,14 @@ export function ParticipantPage() {
     //
     // Ordered oldest first on purpose — a re-analysis writes a new row, and the
     // last one written is the one that should win.
-    const { data: analysisData } = await supabase
+    const { data: analysisData } = await read('ai_summaries:questions', () => supabase
       .from('ai_summaries')
       .select('question_id, output_json')
       .eq('session_id', sessionId)
       .eq('type', 'question_analysis')
       .eq('status', 'success')
       .order('created_at', { ascending: true })
-      .limit(500)
+      .limit(500))
     setQuestionAnalyses(Object.fromEntries(
       ((analysisData || []) as Array<{ question_id: string | null; output_json: unknown }>)
         .filter((row) => row.question_id)
@@ -257,12 +267,10 @@ export function ParticipantPage() {
     ))
 
     if (nextSession?.current_question_id) {
-      const [{ data: questionData }, { data: answerData }] = await Promise.all([
-        supabase.from('questions').select('*').eq('id', nextSession.current_question_id).single(),
-        // Every round, not one row: 再做一次 leaves the earlier answer in place,
-        // so asking for a single row is an error rather than a miss.
-        supabase.from('answers').select('*').eq('question_id', nextSession.current_question_id).eq('participant_id', participantId).order('round'),
-      ])
+      const cachedQuestion = ((allQuestions || []) as Question[]).find(item => item.id === nextSession.current_question_id)
+      const questionData = cachedQuestion || (await read(`questions:${nextSession.current_question_id}`, () => supabase.from('questions').select('*').eq('id', nextSession.current_question_id!).single())).data
+      // The initial snapshot already includes every answer and every round.
+      const answerData = participantAnswers.filter(item => item.question_id === nextSession.current_question_id)
       if (requestId !== loadSequence.current) return
       const nextQuestion = questionData as Question | null
       setQuestion(nextQuestion)
@@ -320,7 +328,7 @@ export function ParticipantPage() {
       }
 
       if (nextQuestion?.screenshot_id) {
-        const { data } = await supabase.from('screenshots').select('*').eq('id', nextQuestion.screenshot_id).single()
+        const { data } = await read(`screenshots:${nextQuestion.screenshot_id}`, () => supabase.from('screenshots').select('*').eq('id', nextQuestion.screenshot_id!).single())
         if (requestId !== loadSequence.current) return
         setScreenshot(data as Screenshot | null)
       } else {
@@ -341,14 +349,15 @@ export function ParticipantPage() {
     // other questions, and the class has to be able to go back to it the whole
     // time. It is on the page alongside whatever they are being asked now.
     if (nextSession?.board_question_id) {
-      const { data: boardData } = await supabase
-        .from('questions').select('*').eq('id', nextSession.board_question_id).maybeSingle()
+      const cachedBoard = ((allQuestions || []) as Question[]).find(item => item.id === nextSession.board_question_id)
+      const boardData = cachedBoard || (await read(`questions:${nextSession.board_question_id}`, () => supabase
+        .from('questions').select('*').eq('id', nextSession.board_question_id!).maybeSingle())).data
       if (requestId !== loadSequence.current) return
       const nextBoard = boardData as Question | null
       setBoardQuestion(nextBoard)
       if (nextBoard?.screenshot_id && nextBoard.share_screenshot) {
-        const { data } = await supabase
-          .from('screenshots').select('public_url').eq('id', nextBoard.screenshot_id).maybeSingle()
+        const { data } = await read(`screenshots:${nextBoard.screenshot_id}`, () => supabase
+          .from('screenshots').select('*').eq('id', nextBoard.screenshot_id!).maybeSingle())
         if (requestId !== loadSequence.current) return
         setBoardImageUrl((data as { public_url: string } | null)?.public_url || null)
       } else {
@@ -448,23 +457,27 @@ export function ParticipantPage() {
 
   useEffect(() => {
     if (!pageVisible) return
+    readCache.current.invalidate()
     const timer = window.setTimeout(() => void loadAll(), Math.random() * 600)
     return () => window.clearTimeout(timer)
   }, [loadAll, pageVisible])
 
+  const quizWaiting = quizData?.attempt?.status === 'grading'
+    || question?.type === 'custom_quiz' && !quizData && (!quizLoadError || quizLoadRetryable)
   useEffect(() => {
-    if (!pageVisible || quizData?.attempt?.status !== 'grading') return
-    const timer = window.setInterval(() => void loadAll(), 2000)
-    return () => window.clearInterval(timer)
-  }, [loadAll, pageVisible, quizData?.attempt?.status])
-
-  useEffect(() => {
-    if (!pageVisible || !liveSessionId || !participantToken || question?.type !== 'custom_quiz' || quizData || (quizLoadError && !quizLoadRetryable)) return
-    const timer = window.setInterval(() => {
-      if (navigator.onLine !== false) void loadAll()
-    }, quizLoadError ? 10_000 : 1500)
-    return () => window.clearInterval(timer)
-  }, [loadAll, liveSessionId, pageVisible, participantToken, question?.type, quizData, quizLoadError, quizLoadRetryable])
+    if (!pageVisible || !liveSessionId || !participantToken || !quizWaiting) return
+    let active = true
+    let timer: ReturnType<typeof setTimeout>
+    const started = Date.now()
+    const delay = () => Math.max(quizLoadError ? 10_000 : 0, classroomRetryDelay(Date.now() - started))
+    const poll = async () => {
+      try { if (active && navigator.onLine !== false) await loadAll() }
+      catch { /* The next bounded retry or Realtime event recovers. */ }
+      finally { if (active) timer = setTimeout(poll, delay()) }
+    }
+    timer = setTimeout(poll, delay())
+    return () => { active = false; clearTimeout(timer) }
+  }, [loadAll, liveSessionId, pageVisible, participantToken, question?.id, quizWaiting, quizLoadError])
 
   // Dispatching one question writes a screenshot, a question and the session
   // row, so every student page used to run its seven queries three times over.
@@ -483,7 +496,7 @@ export function ParticipantPage() {
   }, [loadAll])
 
   useEffect(() => {
-    const reconnect = () => { scheduleLoad(); void refreshParticipantRow() }
+    const reconnect = () => { readCache.current.invalidate(); scheduleLoad(); void refreshParticipantRow() }
     window.addEventListener('online', reconnect)
     return () => window.removeEventListener('online', reconnect)
   }, [refreshParticipantRow, scheduleLoad])
@@ -498,11 +511,11 @@ export function ParticipantPage() {
     // Keep lifecycle events after class ends. DELETE cannot rely on a row
     // filter unless replica identity is FULL; match its primary key locally.
     const channel = supabase.channel(`participant-session:${sessionId}:${participantId}`)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, scheduleLoad)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, () => { readCache.current.invalidate('sessions'); scheduleLoad() })
       .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'sessions' }, payload => {
         if (payload.old?.id === sessionId) markSessionGone()
       })
-      .subscribe(status => { if (status === 'SUBSCRIBED') scheduleLoad() })
+      .subscribe(status => { if (status === 'SUBSCRIBED') { readCache.current.invalidate(); scheduleLoad() } })
     return () => { void supabase.removeChannel(channel) }
   }, [markSessionGone, pageVisible, participantId, scheduleLoad, sessionGone, sessionId])
 
@@ -511,12 +524,12 @@ export function ParticipantPage() {
     const supabase = requireSupabase()
     const channel = supabase
       .channel(`participant:${sessionId}:${participantId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'questions', filter: `session_id=eq.${sessionId}` }, scheduleLoad)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'answers', filter: `participant_id=eq.${participantId}` }, scheduleLoad)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'screenshots', filter: `session_id=eq.${sessionId}` }, scheduleLoad)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'exit_tickets', filter: `participant_id=eq.${participantId}` }, scheduleLoad)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ai_summaries', filter: `session_id=eq.${sessionId}` }, scheduleLoad)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'shared_contents', filter: `session_id=eq.${sessionId}` }, scheduleLoad)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'questions', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('questions'); scheduleLoad() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'answers', filter: `participant_id=eq.${participantId}` }, () => { readCache.current.invalidate('answers'); scheduleLoad() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'screenshots', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('screenshots'); scheduleLoad() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'exit_tickets', filter: `participant_id=eq.${participantId}` }, () => { readCache.current.invalidate('exit_tickets'); scheduleLoad() })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ai_summaries', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('ai_summaries'); scheduleLoad() })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'shared_contents', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('shared_contents'); scheduleLoad() })
       // Their own row, and no one else's, so that the presenter lowering a
       // hand reaches the student who raised it without costing the class a
       // round of queries. Patched straight from the payload for the same
@@ -524,11 +537,13 @@ export function ParticipantPage() {
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'participants', filter: `id=eq.${participantId}` }, (payload) => {
         const row = payload.new as Participant
         if (row?.id !== participantId || row.session_id !== sessionId) return
+        readCache.current.invalidate('participants')
         participantRevision.current.changed()
         setParticipant((current) => (current ? { ...current, ...row } : current))
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'session_events', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const event = payload.new as SessionEvent
+        readCache.current.invalidate('session_events')
         if (event.event_type === 'buzzer') {
           setBuzzerEvent(event)
           setLotteryEvent(null)
@@ -544,13 +559,42 @@ export function ParticipantPage() {
         }
       })
       .subscribe(status => {
-        if (status === 'SUBSCRIBED') { void refreshParticipantRow(); scheduleLoad() }
+        if (status === 'SUBSCRIBED') { readCache.current.invalidate(); void refreshParticipantRow(); scheduleLoad() }
       })
 
     return () => {
       supabase.removeChannel(channel)
     }
   }, [loadAll, liveSessionId, participantId, refreshParticipantRow, scheduleLoad, sessionId])
+
+  // Realtime is the fast path. A small, jittered probe recovers a missed
+  // dispatch/switch event without reloading the whole lesson on every tick.
+  const latestSession = useRef(session)
+  latestSession.current = session
+  useEffect(() => {
+    if (!isSupabaseConfigured || !pageVisible || !sessionId || !participantId || sessionGone || session?.status === 'ended') return
+    let active = true
+    let checking = false
+    const check = async () => {
+      if (!active || checking || document.visibilityState === 'hidden' || navigator.onLine === false) return
+      checking = true
+      try {
+        const { data, error: readError } = await requireSupabase().from('sessions')
+          .select('id,current_question_id,status,danmaku_enabled,anonymous_enabled,board_question_id')
+          .eq('id', sessionId).maybeSingle()
+        if (!active || readError) return
+        if (!data) { markSessionGone(); return }
+        const current = latestSession.current
+        if (!current || Object.entries(data).some(([key, value]) => current[key as keyof Session] !== value)) {
+          readCache.current.invalidate()
+          scheduleLoad()
+        }
+      } catch { /* Keep the last known class during a network failure. */ }
+      finally { checking = false }
+    }
+    const timer = window.setInterval(() => void check(), 20_000 + Math.random() * 10_000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [markSessionGone, pageVisible, participantId, scheduleLoad, session?.status, sessionGone, sessionId])
 
   useEffect(() => {
     if (session?.status !== 'ended') return
@@ -564,23 +608,30 @@ export function ParticipantPage() {
     event.preventDefault()
     const content = message.trim()
     if (!participant || session?.status !== 'active' || !content) return
-    if (onBreak || !danmakuOpen) return
+    // Answer progress and transient teacher Presence never control comments.
+    if (!danmakuOpen || messageSending.current) return
     if (!messageFitsLimit(content)) {
       setError(`彈幕上限為 ${MESSAGE_MAX_CJK_CHARACTERS} 個中文字或 ${MESSAGE_MAX_ENGLISH_WORDS} 個英文單字。`)
       return
     }
     setError('')
+    messageSending.current = true
+    setMessageBusy(true)
     try {
-      await requireSupabase().from('messages').insert({
+      const { error: sendError } = await requireSupabase().from('messages').insert({
         session_id: sessionId,
         participant_id: participant.id,
         participant_name: participant.name,
         content,
         anonymous_at_display: session?.anonymous_enabled ?? true,
       })
-      setMessage('')
+      if (sendError) throw sendError
+      setMessage(current => current.trim() === content ? '' : current)
     } catch (err) {
       setError(err instanceof Error ? err.message : '送出失敗')
+    } finally {
+      messageSending.current = false
+      setMessageBusy(false)
     }
   }
 
@@ -605,6 +656,7 @@ export function ParticipantPage() {
         .select('*')
         .single()
       if (insertError) throw insertError
+      readCache.current.invalidate('answers')
       setAnswer(data as Answer)
     } catch (err) {
       setError(err instanceof Error ? err.message : '作答失敗，可能已經提交過。')
@@ -624,6 +676,7 @@ export function ParticipantPage() {
       })
       if (submitError) throw submitError
       if (!data?.answer) throw new Error(data?.message || '作答送出失敗。')
+      readCache.current.invalidate('answers')
       setAnswer(data.answer as Answer)
     } catch (caught) {
       setError(await participantFunctionMessage(caught, '作答送出失敗。'))
@@ -642,6 +695,7 @@ export function ParticipantPage() {
       })
       if (submitError) throw submitError
       if (!data?.attempt) throw new Error(data?.message || '自訂測驗送出失敗。')
+      readCache.current.invalidate('answers', 'exit_tickets')
       await loadAll()
     } catch (caught) {
       setError(await participantFunctionMessage(caught, '自訂測驗送出失敗。'))
@@ -659,6 +713,7 @@ export function ParticipantPage() {
         body: { action: 'retry_custom_quiz_grading', sessionId, participantId: participant.id, participantToken, questionId: question.id },
       })
       if (retryError) throw retryError
+      readCache.current.invalidate('answers', 'exit_tickets')
       await loadAll()
     } catch (caught) {
       setError(await participantFunctionMessage(caught, '無法重新評分。'))
@@ -709,6 +764,7 @@ export function ParticipantPage() {
       })
       if (submitError) throw submitError
       if (!data?.response) throw new Error(data?.message || '錄音送出失敗。')
+      readCache.current.invalidate('answers', 'exit_tickets')
       await loadAll()
     } catch (caught) {
       setError(await participantFunctionMessage(caught, '錄音送出失敗，請稍後再試。'))
@@ -736,6 +792,7 @@ export function ParticipantPage() {
         .select('*')
         .single()
       if (insertError) throw insertError
+      readCache.current.invalidate('exit_tickets')
       setExitTicket(data as ExitTicket)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Exit Ticket 送出失敗，可能已經提交過。')
@@ -887,6 +944,7 @@ export function ParticipantPage() {
     const previousHand = participant.hand_raised_at
     participantRevision.current.changed()
     const mutationRevision = participantRevision.current.current()
+    handMutation.current = true
     setHandBusy(true)
     setParticipant((current) => (
       current ? { ...current, hand_raised_at: raised ? new Date().toISOString() : null } : current
@@ -906,6 +964,8 @@ export function ParticipantPage() {
         setParticipant(current => current ? { ...current, hand_raised_at: previousHand } : current)
       }
     } finally {
+      readCache.current.invalidate('participants')
+      handMutation.current = false
       setHandBusy(false)
     }
   }
@@ -1048,11 +1108,8 @@ export function ParticipantPage() {
         analyses={questionAnalyses}
         onLoadDetails={loadHistoryDetails}
       />
-      {/* The field goes away rather than being disabled. A disabled box still
-          invites a student to type a question into it that nobody will ever
-          read, and a class left alone with a live text field is how the message
-          table fills up with an hour of chatter aimed at an empty room. */}
-      {!onBreak && <form className={`panel message-form${danmakuOpen ? '' : ' is-closed'}`} onSubmit={sendMessage}>
+      {/* Only the stored classroom switch controls comments, not answers or Presence. */}
+      <form className={`panel message-form${danmakuOpen ? '' : ' is-closed'}`} onSubmit={sendMessage}>
         <label>
           {participantText(locale, 'sendFeedback')}
           <textarea
@@ -1071,8 +1128,8 @@ export function ParticipantPage() {
           {danmakuOpen && message && ` · ${participantText(locale, 'used')} ${Math.ceil(messageUsage(message).units)}/${MESSAGE_MAX_CJK_CHARACTERS}`}
         </p>
         {error && <p className="error">{error}</p>}
-        <button disabled={!danmakuOpen || !message.trim() || !messageFitsLimit(message)} type="submit"><Send size={18} />{participantText(locale, 'send')}</button>
-      </form>}
+        <button disabled={messageBusy || !danmakuOpen || !message.trim() || !messageFitsLimit(message)} type="submit"><Send size={18} />{participantText(locale, 'send')}</button>
+      </form>
       <LotteryOverlay event={lotteryEvent} participantId={participant?.id} />
       <BuzzerOverlay
         busy={buzzerBusy}

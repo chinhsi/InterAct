@@ -43,6 +43,7 @@ async function main() {
     loadedQuizQuestionId: { current: 'quiz' }, coalescedLoad: { current: fn => fn() }, useCallback: fn => fn,
     participantFunctionMessage: async () => 'temporarily unavailable',
     markSessionGone: () => {},
+    readCache: { current: { scope() {}, read: (_key, load) => load() } }, handMutation: { current: false },
   }
   for (const node of participant.nodes) {
     if (ts.isIdentifier(node) && /^set[A-Z]/.test(node.text)) context[node.text] = value => { state[node.text.slice(3)] = value }
@@ -64,20 +65,21 @@ async function main() {
   assert.equal(state.QuizLoadRetryable, true)
   for (const status of [408, 429, 500, 503]) assert.equal(context.retry({ context: { status } }), true)
   for (const status of [400, 401, 403, 404]) assert.equal(context.retry({ context: { status } }), false)
-  const effect = participant.nodes.find(node => ts.isCallExpression(node) && node.expression.getText(participant.tree) === 'useEffect' && node.getText(participant.tree).includes('quizLoadRetryable'))
+  const effect = participant.nodes.find(node => ts.isCallExpression(node) && node.expression.getText(participant.tree) === 'useEffect' && node.getText(participant.tree).includes('!quizWaiting'))
   assert(effect)
   let tick, delay, loads = 0
   const timer = { pageVisible: true, liveSessionId: 'session', participantToken: 'token', question: { type: 'custom_quiz' },
-    quizData: null, quizLoadError: '503', quizLoadRetryable: true, navigator: { onLine: true },
-    loadAll: () => loads++, useEffect: fn => fn(), window: { setInterval: (fn, ms) => { tick = fn; delay = ms; return 1 }, clearInterval() {} } }
+    quizData: null, quizLoadError: '503', quizWaiting: true, navigator: { onLine: true }, Date,
+    classroomRetryDelay: () => 1500, setTimeout: (fn, ms) => { tick = fn; delay = ms; return 1 }, clearTimeout() {},
+    loadAll: async () => { loads++ }, useEffect: fn => fn() }
   vm.runInNewContext(compile(effect.getText(participant.tree)), timer)
   assert.equal(delay, 10_000, 'Transient error retries must back off')
-  tick(); assert.equal(loads, 1)
-  timer.navigator.onLine = false; tick(); assert.equal(loads, 1)
+  await tick(); assert.equal(loads, 1)
+  timer.navigator.onLine = false; await tick(); assert.equal(loads, 1)
   tick = null; timer.pageVisible = false
   vm.runInNewContext(compile(effect.getText(participant.tree)), timer)
   assert.equal(tick, null, 'Hidden pages must not poll quizzes')
-  timer.pageVisible = true; timer.quizLoadRetryable = false
+  timer.pageVisible = true; timer.quizWaiting = false
   vm.runInNewContext(compile(effect.getText(participant.tree)), timer)
   assert.equal(tick, null, 'Authentication errors must not loop')
   console.log('PASS: capture decode/IPC recovery, expanded menu, quiz answer preservation, transient retry/backoff, offline/hidden/auth guards; no paid APIs')

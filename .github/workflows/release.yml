@@ -88,6 +88,7 @@ jobs:
           node scripts/test-rating-question.cjs
           node scripts/test-dispatch-navigation.cjs
           node scripts/test-error-recovery.cjs
+          node scripts/test-student-capacity.cjs
 
       # Deliberately built with no Supabase project configured: whoever downloads
       # this enters their own on first launch. Baking one in would send every

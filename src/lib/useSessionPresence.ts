@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPresencePublisher } from './presencePublisher'
 import { isSupabaseConfigured, requireSupabase } from './supabase'
 import type { Participant } from '../types'
 
@@ -93,18 +94,18 @@ export function useSessionPresence(sessionId: string, options: Options): Session
         .on('presence', { event: 'leave' }, syncClass)
     }
 
-    channel.subscribe(async (status) => {
-      if (status !== 'SUBSCRIBED') return
+    const publisher = createPresencePublisher(() => channel.track({
+      role: 'participant', participant_id: participantId, online_at: new Date().toISOString(),
+    }))
+    channel.subscribe((status) => {
+      if (status !== 'SUBSCRIBED') { publisher.cancel(); return }
       if (role === 'participant') {
-        await channel.track({
-          role: 'participant',
-          participant_id: participantId,
-          online_at: new Date().toISOString(),
-        })
+        publisher.start()
       }
     })
 
     return () => {
+      publisher.cancel()
       void channel.untrack()
       void supabase.removeChannel(channel)
     }
@@ -149,8 +150,10 @@ export function useSessionPresence(sessionId: string, options: Options): Session
         .on('presence', { event: 'leave' }, syncTeacher)
     }
 
-    channel.subscribe(async (status) => {
+    const publisher = createPresencePublisher(() => channel.track({ role: 'presenter', online_at: new Date().toISOString() }))
+    channel.subscribe((status) => {
       if (status !== 'SUBSCRIBED') {
+        publisher.cancel()
         // Our own line to the room is down. Report not knowing rather than
         // reporting an empty room, which would blame the teacher for the
         // student's own dropped connection.
@@ -161,11 +164,12 @@ export function useSessionPresence(sessionId: string, options: Options): Session
         return
       }
       if (role === 'presenter') {
-        await channel.track({ role: 'presenter', online_at: new Date().toISOString() })
+        publisher.start()
       }
     })
 
     return () => {
+      publisher.cancel()
       clearGrace()
       void channel.untrack()
       void supabase.removeChannel(channel)

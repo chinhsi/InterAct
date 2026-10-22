@@ -24,6 +24,7 @@ async function run(sessionResult, stale = false) {
     loadSequence: { current: 0 }, goneSessionId: { current: '' },
     participantRevision: { current: { current: () => 0 } },
     coalescedLoad: { current: fn => fn() }, useCallback: fn => fn,
+    readCache: { current: { scope() {}, read: (_key, load) => load() } }, handMutation: { current: false },
     setSession: value => calls.push(['session', value]),
     setSessionChecked: value => calls.push(['checked', value]),
     setParticipant: value => calls.push(['participant', value]),
