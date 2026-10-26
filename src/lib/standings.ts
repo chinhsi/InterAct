@@ -21,6 +21,7 @@ import { buzzerWinsFrom, participationRows } from './participation'
 import type { Badge } from './participation'
 import { getReportCredentials } from './presenterAuth'
 import { createBatchedRefresh, createRealtimeSnapshot } from './realtimeSnapshot'
+import { logDiagnostic } from './diagnostics'
 import { requireSupabase } from './supabase'
 import type {
   Answer, BoardPost, FileResponse, Message, Participant, ParticipantPoint,
@@ -48,12 +49,12 @@ export function useStandingsBroadcast(sessionId: string, presenceKey: string) {
   const dirtyPrivate = useRef(new Set(['quiz', 'uploads', 'board']))
   const privateData = useRef<{ quiz: SessionCustomQuizResults | null; uploads: FileResponse[] }>({ quiz: null, uploads: [] })
   const forceSend = useRef(0)
+  const privateRetryAt = useRef(new Map<string, number>())
 
   const compute = useCallback(async (): Promise<Standing[]> => {
     const startedGeneration = generation.current
     const current = () => startedGeneration === generation.current
     const supabase = requireSupabase()
-    const credentials = getReportCredentials(sessionId)
     if (fullRefresh.current || !ready.current) {
       fullRefresh.current = false
       cache.current.begin()
@@ -81,9 +82,10 @@ export function useStandingsBroadcast(sessionId: string, presenceKey: string) {
     // than the table. Without them the score would be lower than the roster's
     // for anyone who sat a quiz or handed in a photograph.
     const actions: Record<string, string> = { quiz: 'get_session_custom_quiz_results', uploads: 'get_file_responses', board: 'get_session_board_posts' }
-    const privateResults = await Promise.allSettled([...dirtyPrivate.current].map(async source => {
+    await Promise.allSettled([...dirtyPrivate.current].filter(source => (privateRetryAt.current.get(source) || 0) <= Date.now()).map(async source => {
       dirtyPrivate.current.delete(source)
       try {
+        const credentials = getReportCredentials(sessionId)
         // Board events can arrive while this private snapshot is loading too.
         if (source === 'board') cache.current.begin()
         const result = await supabase.functions.invoke('presenter-action', { body: { action: actions[source], ...credentials } })
@@ -94,14 +96,20 @@ export function useStandingsBroadcast(sessionId: string, presenceKey: string) {
         if (source === 'board') {
           cache.current.replace({ board_posts: result.data.posts || [] })
         }
-      } catch (error) {
-        if (current()) { if (source === 'board') cache.current.abort(); dirtyPrivate.current.add(source) }
-        throw error
+        privateRetryAt.current.delete(source)
+      } catch {
+        if (current()) {
+          if (source === 'board') cache.current.abort()
+          dirtyPrivate.current.add(source)
+          if (!privateRetryAt.current.has(source)) logDiagnostic('standings_private_source_failed', { source })
+          privateRetryAt.current.set(source, Date.now() + 5000)
+        }
       }
     }))
     if (!current()) return []
-    const failedPrivate = privateResults.find(result => result.status === 'rejected')
-    if (failedPrivate?.status === 'rejected') throw failedPrivate.reason
+    // One optional source failing must not freeze every student's live points.
+    // Retain its last good data while messages, answers and manual points keep
+    // updating; a later successful retry reconciles the remaining sources.
 
     const participants = cache.current.rows<Participant>('participants').filter(entry => !entry.removed_at)
     const quiz = privateData.current.quiz
@@ -149,7 +157,7 @@ export function useStandingsBroadcast(sessionId: string, presenceKey: string) {
   useEffect(() => {
     if (!sessionId) return
     const supabase = requireSupabase()
-    const channel = supabase.channel(CHANNEL(sessionId))
+    const channel = supabase.channel(CHANNEL(sessionId), { config: { broadcast: { ack: true } } })
     generation.current++
     const invalidateGeneration = () => { generation.current++ }
     cache.current = createRealtimeSnapshot()
@@ -157,22 +165,36 @@ export function useStandingsBroadcast(sessionId: string, presenceKey: string) {
     fullRefresh.current = true
     privateData.current = { quiz: null, uploads: [] }
     dirtyPrivate.current = new Set(['quiz', 'uploads', 'board'])
+    privateRetryAt.current = new Map()
     forceSend.current++
 
     let active = true
     let lastPayload = ''
     let lastForcedVersion = -1
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let sendFailures = 0
+    const retry = (delay: number) => {
+      if (!active || retryTimer !== null) return
+      retryTimer = setTimeout(() => { retryTimer = null; if (active) batch.request() }, delay)
+    }
     const batch = createBatchedRefresh(async () => {
       if (!active || navigator.onLine === false) return
       try {
         const rows = await compute()
         if (!active || !rows.length) return
+        if (privateRetryAt.current.size) retry(5000)
         const signature = JSON.stringify(rows)
         const forcedVersion = forceSend.current
         if (forcedVersion === lastForcedVersion && signature === lastPayload) return
         const result = await channel.send({ type: 'broadcast', event: 'standings', payload: { rows, sentAt: Date.now() } })
-        if (result === 'ok') { lastPayload = signature; lastForcedVersion = forcedVersion }
+        if (result === 'ok') { lastPayload = signature; lastForcedVersion = forcedVersion; sendFailures = 0 }
+        else {
+          sendFailures++
+          logDiagnostic('standings_send_failed', { result })
+          if (sendFailures <= 3) retry(1500 * sendFailures)
+        }
       } catch {
+        logDiagnostic('standings_refresh_failed')
         // A class that cannot be scored still runs. Nothing here is worth
         // interrupting a lesson for.
       }
@@ -211,6 +233,7 @@ export function useStandingsBroadcast(sessionId: string, presenceKey: string) {
       active = false
       invalidateGeneration()
       batch.stop()
+      if (retryTimer !== null) clearTimeout(retryTimer)
       window.removeEventListener('online', resync)
       window.clearInterval(timer)
       publishRef.current = null

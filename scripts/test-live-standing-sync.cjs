@@ -75,14 +75,15 @@ async function main() {
     answers: [], messages: [], session_events: [], participant_points: [],
   }
   const bindings = []; const sent = []; const cleanups = []; const intervals = []; const listeners = new Map()
-  let reads = 0; let privateReads = 0; let failReads = false; let subscribed
+  let quizAttempts = []
+  let reads = 0; let privateReads = 0; let failReads = false; let failPrivate = false; let subscribed; let sendStatus = 'ok'
   const channel = {
     on(type, filter, callback) { bindings.push({ type, filter, callback }); return this },
     subscribe(callback) { subscribed = callback; callback('SUBSCRIBED'); return this },
-    async send(message) { sent.push(message); return 'ok' },
+    async send(message) { sent.push(message); return sendStatus },
   }
   const client = {
-    channel: () => channel, removeChannel: () => {},
+    channel: (_topic, options) => { assert.equal(options?.config?.broadcast?.ack, true, 'Score broadcasts require server acknowledgement'); return channel }, removeChannel: () => {},
     from(table) {
       reads++
       const query = { select() { return this }, eq() { return this }, order() { return this }, limit() { return this },
@@ -92,7 +93,8 @@ async function main() {
     functions: { async invoke(_name, options) {
       privateReads++
       const action = options.body.action
-      return { data: action.includes('quiz') ? { attempts: [] } : action.includes('board') ? { posts: [] } : { responses: [] }, error: null }
+      if (failPrivate) return { data: null, error: new Error('private source unavailable') }
+      return { data: action.includes('quiz') ? { attempts: quizAttempts } : action.includes('board') ? { posts: [] } : { responses: [] }, error: null }
     } },
   }
   const api = load('src/lib/standings.ts', {
@@ -102,7 +104,7 @@ async function main() {
       addEventListener: (event, fn) => listeners.set(event, fn), removeEventListener: event => listeners.delete(event) },
     require: name => name === 'react' ? { useRef: current => ({ current }), useCallback: fn => fn, useState: () => [null, () => {}], useEffect: fn => { const cleanup = fn(); if (cleanup) cleanups.push(cleanup) } }
       : name.includes('participation') ? participation : name.includes('presenterAuth') ? { getReportCredentials: () => ({ sessionId: 'class', presenterToken: 'fixture' }) }
-      : name.includes('realtimeSnapshot') ? snapshots : { requireSupabase: () => client },
+      : name.includes('realtimeSnapshot') ? snapshots : name.includes('diagnostics') ? { logDiagnostic() {} } : { requireSupabase: () => client },
   })
   api.useStandingsBroadcast('class', 'presence')
   await hookClock.tick(350); await hookClock.tick(1000)
@@ -141,6 +143,45 @@ async function main() {
   failReads = false
   subscribed('SUBSCRIBED'); await hookClock.tick(1000)
   assert.equal(sent.length, beforeFailure + 1, 'reconnect must immediately reconcile')
+  failPrivate = true
+  intervals[0](); await hookClock.tick(1000)
+  const beforePrivateFailure = sent.at(-1).payload.rows.find(row => row.id === 'p0').score
+  const delayedMessage = { id: 'message-during-private-failure', session_id: 'class', participant_id: 'p0' }
+  db.messages.push(delayedMessage); emit('messages', 'INSERT', delayedMessage)
+  await hookClock.tick(1000)
+  assert.equal(sent.at(-1).payload.rows.find(row => row.id === 'p0').score, beforePrivateFailure + 2,
+    'A failed quiz/upload/board read must not suppress live danmaku points')
+  const privateReadsDuringFailure = privateReads
+  for (let i = 0; i < 4; i++) {
+    const row = { id: `more-message-${i}`, session_id: 'class', participant_id: 'p0' }
+    db.messages.push(row); emit('messages', 'INSERT', row)
+  }
+  await hookClock.tick(1000)
+  assert.equal(privateReads, privateReadsDuringFailure, 'Live messages must not hammer failed private endpoints')
+  const rosterScore = participation.participationRows({ participants: db.participants, questions: db.questions, answers: [], messages: db.messages, quizAttempts: [], endedAt: null })[0].score
+  assert(rosterScore > beforePrivateFailure, 'Messages and their badge must increase the roster score')
+  const actualStandingPayload = sent.at(-1).payload
+  assert.equal(actualStandingPayload.rows.find(row => row.id === 'p0').score, rosterScore)
+  failPrivate = false
+  await hookClock.tick(5000)
+  assert(privateReads > privateReadsDuringFailure, 'Private sources recover in the background without needing a new message')
+  quizAttempts = [{ id: 'graded', participant_id: 'p0', status: 'graded', total_score: 100, max_score: 100 }]
+  bindings.find(binding => binding.filter.event === 'score_sources_changed').callback({ payload: { source: 'quiz' } })
+  await hookClock.tick(1000)
+  const withPrivateScore = sent.at(-1).payload.rows.find(row => row.id === 'p0').score
+  assert(withPrivateScore > rosterScore, 'A graded quiz must add its participation and grading points')
+  failPrivate = true; intervals[0](); await hookClock.tick(1000)
+  assert.equal(sent.at(-1).payload.rows.find(row => row.id === 'p0').score, withPrivateScore,
+    'Failed private reads must retain an already awarded quiz score, not erase it')
+  failPrivate = false; await hookClock.tick(5000)
+  sendStatus = 'timed out'
+  const transportMessage = { id: 'transport-retry', session_id: 'class', participant_id: 'p0' }
+  db.messages.push(transportMessage); emit('messages', 'INSERT', transportMessage)
+  await hookClock.tick(1000)
+  const failedSendCount = sent.length
+  sendStatus = 'ok'
+  await hookClock.tick(1600)
+  assert(sent.length > failedSendCount, 'A failed score send retries without waiting for the next student action')
   cleanups.forEach(cleanup => cleanup())
   assert.equal(listeners.size, 0)
 
@@ -151,9 +192,11 @@ async function main() {
   })
   ownApi.useMyStanding('class', 'p0', () => handSyncs++)
   const scores = ownBindings.find(binding => binding.filter.event === 'standings').callback
-  scores({ payload: { sentAt: 200, rows: [{ id: 'p0', score: 12 }] } })
+  scores({ payload: actualStandingPayload })
+  assert.equal(ownUpdates.at(-1).score, rosterScore, 'Actual presenter payload must reach the student standing hook')
+  scores({ payload: { sentAt: Date.now() + 200, rows: [{ id: 'p0', score: 12 }] } })
   scores({ payload: { sentAt: 100, rows: [{ id: 'p0', score: 3 }] } })
-  assert.equal(ownUpdates.length, 1, 'out-of-order broadcasts cannot roll back scores')
+  assert.equal(ownUpdates.length, 2, 'out-of-order broadcasts cannot roll back scores')
   const hands = ownBindings.find(binding => binding.filter.event === 'hands_lowered').callback
   hands({ payload: { participantId: 'another-student' } }); assert.equal(handSyncs, 0)
   hands({ payload: { participantId: 'p0' } }); hands({ payload: { participantId: '' } }); assert.equal(handSyncs, 2)
