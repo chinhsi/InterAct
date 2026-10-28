@@ -207,7 +207,7 @@ export function useStandingsBroadcast(sessionId: string, presenceKey: string) {
       batch.request()
     })
     for (const table of ['participants', 'questions', 'answers', 'messages', 'session_events', 'participant_points', 'board_posts']) {
-      channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `session_id=eq.${sessionId}` }, payload => {
+      channel.on('postgres_changes', { event: '*', schema: 'interact', table, filter: `session_id=eq.${sessionId}` }, payload => {
         if (!active) return
         const row = (payload.eventType === 'DELETE' ? payload.old : payload.new) as Record<string, unknown>
         if (row.session_id && row.session_id !== sessionId) return

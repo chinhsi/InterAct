@@ -122,8 +122,8 @@ export function ParticipantBoard({ locale, locked, participant, participantToken
     const supabase = requireSupabase()
     const channel = supabase
       .channel(`board:${question.id}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'board_posts', filter: `question_id=eq.${question.id}` }, () => { void loadWall() })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'board_reactions', filter: `session_id=eq.${session.id}` }, () => { void loadWall() })
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'board_posts', filter: `question_id=eq.${question.id}` }, () => { void loadWall() })
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'board_reactions', filter: `session_id=eq.${session.id}` }, () => { void loadWall() })
       .subscribe()
     return () => { void supabase.removeChannel(channel) }
   }, [loadWall, question.id, revealed, session.id, session.status, pageVisible])

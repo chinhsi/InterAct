@@ -172,9 +172,9 @@ export function RosterPage() {
     if (!isSupabaseConfigured || !sessionId) return
     const supabase = requireSupabase()
     const channel = supabase.channel(`roster:${sessionId}`)
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'participants', filter: `session_id=eq.${sessionId}` }, applyParticipant)
+    channel.on('postgres_changes', { event: '*', schema: 'interact', table: 'participants', filter: `session_id=eq.${sessionId}` }, applyParticipant)
     for (const table of ['answers', 'messages', 'questions', 'session_events', 'participant_points', 'board_posts']) {
-      channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `session_id=eq.${sessionId}` }, scheduleLoad)
+      channel.on('postgres_changes', { event: '*', schema: 'interact', table, filter: `session_id=eq.${sessionId}` }, scheduleLoad)
     }
     channel.subscribe()
     // Attention is reported on a heartbeat rather than as a row change, so the

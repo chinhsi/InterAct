@@ -39,7 +39,7 @@ export function ParticipantSharedFiles({ sessionId, locale, live = true }: Props
 
     const channel = live ? supabase.channel(`shared-files:${sessionId}`)
       .on('postgres_changes', {
-        event: '*', schema: 'public', table: 'shared_files', filter: `session_id=eq.${sessionId}`,
+        event: '*', schema: 'interact', table: 'shared_files', filter: `session_id=eq.${sessionId}`,
       }, () => void load())
       .subscribe() : null
 

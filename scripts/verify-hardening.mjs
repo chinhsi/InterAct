@@ -14,7 +14,7 @@ function check(label, ok, detail = '') {
 }
 
 function client() {
-  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } })
+  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false }, db: { schema: 'interact' } })
 }
 
 async function anon(label) {
@@ -149,7 +149,7 @@ check('join_session records auth_uid', participant.auth_uid === student.uid, `au
   const seen = { student: 0, stranger: 0 }
   const subscribe = (c, who) => new Promise((resolve, reject) => {
     const channel = c.channel(`verify:${who}:${Date.now()}`)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, () => {
+      .on('postgres_changes', { event: 'UPDATE', schema: 'interact', table: 'sessions', filter: `id=eq.${sessionId}` }, () => {
         seen[who] += 1
       })
       .subscribe((status, err) => {

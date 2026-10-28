@@ -3,8 +3,8 @@ import { createClient } from 'npm:@supabase/supabase-js@2.110.8'
 export function getAdminClient() {
   const projectUrl = Deno.env.get('SUPABASE_URL')
   const secretKeys = Deno.env.get('SUPABASE_SECRET_KEYS')
-  const legacyServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-  const secretKey = secretKeys ? JSON.parse(secretKeys).default : legacyServiceKey
+  const legacyServiceKey = Deno.env.get('INTERACT_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  const secretKey = (secretKeys ? JSON.parse(secretKeys).default : null) || legacyServiceKey
 
   if (!projectUrl || !secretKey) {
     throw new Error('Supabase server credentials are unavailable.')
@@ -12,6 +12,7 @@ export function getAdminClient() {
 
   return createClient(projectUrl, secretKey, {
     auth: { autoRefreshToken: false, persistSession: false },
+    db: { schema: 'interact' },
   })
 }
 

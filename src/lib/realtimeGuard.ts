@@ -18,7 +18,7 @@ export function matchesRealtimeFilter(filter: Record<string, unknown>, payload: 
 }
 
 // SDK fallback bindings without IDs can dispatch '*' across tables on a channel.
-export function guardRealtimeTables(client: SupabaseClient) {
+export function guardRealtimeTables<T extends SupabaseClient<any, any, any>>(client: T): T {
   const channel = client.channel.bind(client)
   const guarded = new WeakSet<RealtimeChannel>()
   client.channel = (...args: Parameters<typeof client.channel>) => {

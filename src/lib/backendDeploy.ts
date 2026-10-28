@@ -154,11 +154,11 @@ export async function verifyBackend(ref: string, token: string) {
     token,
     `select
        (select count(*) from information_schema.tables
-          where table_schema = 'public' and table_name in ('sessions','questions','participants','shared_files','board_posts','board_reactions')) as tables,
+          where table_schema = 'interact' and table_name in ('sessions','questions','participants','shared_files','board_posts','board_reactions')) as tables,
        (select count(*) from storage.buckets
           where id in ('interact-screenshots','interact-recordings','interact-files')) as buckets,
        (select count(*) from information_schema.columns
-          where table_schema = 'public'
+          where table_schema = 'interact'
             and (table_name, column_name) in (
               ('questions','translations'),
               ('questions','allow_multiple'),

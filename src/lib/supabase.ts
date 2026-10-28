@@ -80,6 +80,7 @@ export const isSupabaseConfigured = Boolean(config)
 export const supabase = config
   ? guardRealtimeTables(createClient(config.url, config.key, {
       global: { fetch: boundedFetch },
+      db: { schema: 'interact' },
       realtime: { params: { eventsPerSecond: 20 } },
     }))
   : null

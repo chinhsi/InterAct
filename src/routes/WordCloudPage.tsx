@@ -118,7 +118,7 @@ export function WordCloudPage() {
     const supabase = requireSupabase()
     const channel = supabase
       .channel(`word-cloud:${sessionId}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `session_id=eq.${sessionId}` }, (payload) => {
+      .on('postgres_changes', { event: 'INSERT', schema: 'interact', table: 'messages', filter: `session_id=eq.${sessionId}` }, (payload) => {
         mergeMessages([payload.new as Message])
       })
       .subscribe()

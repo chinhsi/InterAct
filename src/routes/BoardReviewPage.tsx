@@ -43,7 +43,7 @@ export function BoardReviewPage() {
   useEffect(() => {
     const supabase = requireSupabase()
     const channel = supabase.channel(`board-review-settings:${sessionId}`)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, () => void read())
+      .on('postgres_changes', { event: 'UPDATE', schema: 'interact', table: 'sessions', filter: `id=eq.${sessionId}` }, () => void read())
       .subscribe()
     const onOnline = () => void read()
     window.addEventListener('online', onOnline)

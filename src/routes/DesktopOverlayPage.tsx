@@ -141,15 +141,15 @@ export function DesktopOverlayPage() {
     const supabase = requireSupabase()
     const channel = supabase
       .channel(`desktop-overlay:${sessionId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, loadOverlay)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `session_id=eq.${sessionId}` }, (payload) => {
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'sessions', filter: `id=eq.${sessionId}` }, loadOverlay)
+      .on('postgres_changes', { event: 'INSERT', schema: 'interact', table: 'messages', filter: `session_id=eq.${sessionId}` }, (payload) => {
         mergeMessages([payload.new as Message])
       })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'caption_segments', filter: `session_id=eq.${sessionId}` }, (payload) => {
+      .on('postgres_changes', { event: 'INSERT', schema: 'interact', table: 'caption_segments', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const segment = payload.new as CaptionSegment
         showCaption(segment.language, segment.text)
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'session_events', filter: `session_id=eq.${sessionId}` }, (payload) => {
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'session_events', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const event = payload.new as SessionEvent
         showActivityEvent(event)
       })

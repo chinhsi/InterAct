@@ -511,8 +511,8 @@ export function ParticipantPage() {
     // Keep lifecycle events after class ends. DELETE cannot rely on a row
     // filter unless replica identity is FULL; match its primary key locally.
     const channel = supabase.channel(`participant-session:${sessionId}:${participantId}`)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, () => { readCache.current.invalidate('sessions'); scheduleLoad() })
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'sessions' }, payload => {
+      .on('postgres_changes', { event: 'UPDATE', schema: 'interact', table: 'sessions', filter: `id=eq.${sessionId}` }, () => { readCache.current.invalidate('sessions'); scheduleLoad() })
+      .on('postgres_changes', { event: 'DELETE', schema: 'interact', table: 'sessions' }, payload => {
         if (payload.old?.id === sessionId) markSessionGone()
       })
       .subscribe(status => { if (status === 'SUBSCRIBED') { readCache.current.invalidate(); scheduleLoad() } })
@@ -524,24 +524,24 @@ export function ParticipantPage() {
     const supabase = requireSupabase()
     const channel = supabase
       .channel(`participant:${sessionId}:${participantId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'questions', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('questions'); scheduleLoad() })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'answers', filter: `participant_id=eq.${participantId}` }, () => { readCache.current.invalidate('answers'); scheduleLoad() })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'screenshots', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('screenshots'); scheduleLoad() })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'exit_tickets', filter: `participant_id=eq.${participantId}` }, () => { readCache.current.invalidate('exit_tickets'); scheduleLoad() })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ai_summaries', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('ai_summaries'); scheduleLoad() })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'shared_contents', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('shared_contents'); scheduleLoad() })
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'questions', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('questions'); scheduleLoad() })
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'answers', filter: `participant_id=eq.${participantId}` }, () => { readCache.current.invalidate('answers'); scheduleLoad() })
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'screenshots', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('screenshots'); scheduleLoad() })
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'exit_tickets', filter: `participant_id=eq.${participantId}` }, () => { readCache.current.invalidate('exit_tickets'); scheduleLoad() })
+      .on('postgres_changes', { event: 'INSERT', schema: 'interact', table: 'ai_summaries', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('ai_summaries'); scheduleLoad() })
+      .on('postgres_changes', { event: 'INSERT', schema: 'interact', table: 'shared_contents', filter: `session_id=eq.${sessionId}` }, () => { readCache.current.invalidate('shared_contents'); scheduleLoad() })
       // Their own row, and no one else's, so that the presenter lowering a
       // hand reaches the student who raised it without costing the class a
       // round of queries. Patched straight from the payload for the same
       // reason the roster does: the changed row already arrived.
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'participants', filter: `id=eq.${participantId}` }, (payload) => {
+      .on('postgres_changes', { event: 'UPDATE', schema: 'interact', table: 'participants', filter: `id=eq.${participantId}` }, (payload) => {
         const row = payload.new as Participant
         if (row?.id !== participantId || row.session_id !== sessionId) return
         readCache.current.invalidate('participants')
         participantRevision.current.changed()
         setParticipant((current) => (current ? { ...current, ...row } : current))
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'session_events', filter: `session_id=eq.${sessionId}` }, (payload) => {
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'session_events', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const event = payload.new as SessionEvent
         readCache.current.invalidate('session_events')
         if (event.event_type === 'buzzer') {
