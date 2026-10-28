@@ -1,4 +1,4 @@
-name: Release Windows build
+name: Release desktop builds
 
 on:
   push:
@@ -6,26 +6,60 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag to publish (must already exist)'
-        required: true
+      ref:
+        description: 'Tag or branch to build (default: this ref)'
+        required: false
+      publish:
+        description: 'Attach the builds to the release for that tag'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: windows-latest
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Neither artifact is worth publishing on its own, but a platform failure
+      # should still leave the other one inspectable rather than cancelled.
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows
+            os: windows-latest
+            # Zip only. The single-file portable build re-extracts its whole
+            # payload to a temp folder on every launch, so it starts slowly and
+            # was never the one to recommend; shipping both only invited people
+            # to pick the worse one.
+            package: --win zip --x64
+            artifact: InterAct.zip
+          - label: macOS
+            os: macos-latest
+            # Universal, so one download covers Apple Silicon and Intel.
+            package: --mac dmg --universal
+            artifact: InterAct.dmg
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.ref || github.ref }}
 
+      # v6.1.0 or newer is required, not merely preferred: earlier versions do
+      # not know pnpm 12's layout, and on Windows they leave a shim pointing at
+      # ...\.bin\bin\..\global\v11\<hash>\node_modules\pnpm\pnpm — a path with
+      # no file at the end of it, so every pnpm call in the job fails and
+      # nothing is ever installed. Moving package.json to pnpm 12 is what
+      # exposed it. macOS and the Ubuntu Pages deploy were both unaffected,
+      # which is how it reached a tag unnoticed.
+      #
+      # The version below is duplication; keep it in step with packageManager
+      # in package.json.
       - name: Setup pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
-          version: 11.7.0
+          version: 12.5.1
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -40,6 +74,22 @@ jobs:
         run: |
           pnpm lint
           pnpm exec tsc -b
+          node scripts/test-detail-window-visibility.cjs
+          node scripts/test-portable-config.cjs
+          node scripts/test-runtime-backend.cjs
+          node scripts/test-classroom-stability.cjs
+          node scripts/test-reconnect-board.cjs
+          node scripts/test-about-page.mjs
+          node scripts/test-report-credentials.cjs
+          node scripts/test-live-standing-sync.cjs
+          node scripts/test-taskbar-icon.cjs
+          node scripts/test-gemini-models.cjs
+          node scripts/test-session-removed.cjs
+          node scripts/test-rating-question.cjs
+          node scripts/test-dispatch-navigation.cjs
+          node scripts/test-error-recovery.cjs
+          node scripts/test-student-capacity.cjs
+          node scripts/test-fork-isolation.cjs
 
       # Deliberately built with no Supabase project configured: whoever downloads
       # this enters their own on first launch. Baking one in would send every
@@ -62,23 +112,179 @@ jobs:
           fi
           echo "No Supabase project embedded."
 
-      - name: Package Windows app
-        # Zip only. The single-file portable build re-extracts its whole payload
-        # to a temp folder on every launch, so it starts slowly and was never the
-        # one to recommend; shipping both only invited people to pick the worse one.
-        run: pnpm exec electron-builder --win zip --x64 --publish never
+      # The whole of schema.sql is handed to Postgres as a single statement, so
+      # one syntax error anywhere in it leaves a new project with no tables at
+      # all, and the only sign of it is 建立資料表失敗 on the setup screen. That
+      # has happened: an editing pass turned two dollar-quoted blocks from the
+      # doubled delimiter into a single character, which Postgres rejects
+      # outright, and four releases went out unable to create a database.
+      #
+      # A shell check cannot parse SQL, but it can catch the one class of damage
+      # that editing this file actually causes. Written without a single
+      # backslash, using character classes instead, because a mangled backslash
+      # in a quoted string is exactly what broke the schema in the first place.
+      - name: Verify the schema's dollar-quoted blocks
+        shell: bash
+        run: |
+          stray=$(grep -nE '[$]' supabase/schema.sql | grep -vE '[$][$]|[$][a-zA-Z_][a-zA-Z0-9_]*[$]' || true)
+          if [ -n "$stray" ]; then
+            echo "::error::schema.sql has a malformed dollar-quote delimiter."
+            echo "$stray"
+            exit 1
+          fi
+          fail=0
+          for tag in $(grep -oE '[$][$]|[$][a-zA-Z_][a-zA-Z0-9_]*[$]' supabase/schema.sql | sort -u); do
+            n=$(grep -oF "$tag" supabase/schema.sql | wc -l)
+            if [ $((n % 2)) -ne 0 ]; then
+              echo "::error::schema.sql: $tag appears $n times, so a block is left open."
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] && echo "schema.sql: dollar-quoted blocks are well formed and balanced."
+          exit $fail
 
-      - name: Publish release
+      # The whole file runs as one transaction, so a statement that touches a
+      # table before it is created does not merely fail — it takes every table
+      # created before it down with it, and a brand new project comes out of a
+      # successful-looking deployment completely empty. A migration written
+      # beside the feature it belongs to, rather than below the table, is all
+      # it takes; that is how `alter table public.answers` came to sit forty
+      # lines above `create table public.answers`.
+      - name: Verify no table is used before it is created
+        shell: bash
+        run: |
+          awk '
+          /^create table if not exists public\./ {
+            match($0, /public\.[a-z_]+/); t=substr($0,RSTART+7,RLENGTH-7); created[t]=NR
+          }
+          { lines[NR]=$0 }
+          END {
+            bad=0
+            for (n=1; n<=NR; n++) {
+              line=lines[n]
+              if (line ~ /^create table if not exists public\./) continue
+              s=line
+              while (match(s, /public\.[a-z_]+/)) {
+                t=substr(s,RSTART+7,RLENGTH-7)
+                s=substr(s,RSTART+RLENGTH)
+                if (t in created && n < created[t]) {
+                  printf "::error::schema.sql line %d uses public.%s, created at line %d\n", n, t, created[t]
+                  bad++
+                }
+              }
+            }
+            if (bad) exit 1
+            print "schema.sql: every table is created before it is used."
+          }' supabase/schema.sql
+
+      - name: Package
+        run: pnpm exec electron-builder ${{ matrix.package }} --publish never
+
+      - name: Verify Windows executable and taskbar icons
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $source = 'build/icon.ico'
+          $shipped = 'release/win-unpacked/resources/icon.ico'
+          if ((Get-FileHash $source).Hash -ne (Get-FileHash $shipped).Hash) {
+            throw 'The packaged taskbar ICO is missing or changed.'
+          }
+          Add-Type -AssemblyName System.Drawing
+          $exeIcon = [Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path 'release/win-unpacked/InterAct.exe').Path)
+          $sourceIcon = [Drawing.Icon]::new((Resolve-Path $source).Path, $exeIcon.Size)
+          $exeBitmap = $exeIcon.ToBitmap()
+          $sourceBitmap = $sourceIcon.ToBitmap()
+          try {
+            for ($y = 0; $y -lt $exeBitmap.Height; $y++) {
+              for ($x = 0; $x -lt $exeBitmap.Width; $x++) {
+                if ($exeBitmap.GetPixel($x, $y).ToArgb() -ne $sourceBitmap.GetPixel($x, $y).ToArgb()) {
+                  throw 'The Windows executable icon does not match InterAct.'
+                }
+              }
+            }
+            Write-Output 'PASS: embedded EXE icon and shipped taskbar ICO match InterAct.'
+          } finally {
+            $exeBitmap.Dispose(); $sourceBitmap.Dispose()
+            $exeIcon.Dispose(); $sourceIcon.Dispose()
+          }
+
+      # identity: '-' is easy to set and easy to have silently ignored, and the
+      # difference only shows up as an app that will not open on an Apple Silicon
+      # Mac. Read the signature back off the built app instead of assuming it.
+      - name: Verify the app is signed
+        if: matrix.os == 'macos-latest'
+        run: |
+          app=release/mac-universal/InterAct.app
+          codesign --display --verbose=2 "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          echo "Architectures:"
+          lipo -archs "$app/Contents/MacOS/InterAct"
+          # Without these two strings macOS denies the microphone and the screen
+          # outright, and the app looks broken rather than unapproved. PlistBuddy
+          # exits non-zero on a missing key, so a dropped extendInfo fails here
+          # instead of on someone's Mac.
+          echo "Usage descriptions:"
+          /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :NSScreenCaptureUsageDescription' "$app/Contents/Info.plist"
+
+      - name: Upload build
+        if: github.event_name != 'push' && !inputs.publish
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.label }}
+          path: release/${{ matrix.artifact }}
+          if-no-files-found: error
+
+      # Published downloads do not need an intermediate Actions artifact. That
+      # quota is shared by the account and can be full despite a valid build.
+      - name: Upload release asset
+        if: github.event_name == 'push' || inputs.publish
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
-        shell: bash
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.ref || github.ref_name }}
+          ASSET: release/${{ matrix.artifact }}
+        run: |
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            # Both platform jobs may arrive here together. A competing create
+            # is harmless only if the expected release now exists.
+            gh release create "$TAG" --repo "$REPO" --draft --verify-tag --title "InterAct $TAG" --notes "Preparing desktop downloads." \
+              || gh release view "$TAG" --repo "$REPO" >/dev/null
+          fi
+          gh release upload "$TAG" "$ASSET" --repo "$REPO" --clobber
+
+  publish:
+    name: Publish release
+    needs: build
+    # Pushing a tag publishes, as before. A manual run defaults to building only,
+    # so an unsigned macOS build can be downloaded and actually opened on a Mac
+    # before it goes onto the public release page.
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.ref || github.ref_name }}
         run: |
           notes=$(cat <<'MD'
           ## 下載
 
-          下載 `InterAct.zip`，解壓縮後執行資料夾裡的 `InterAct.exe` 即可，免安裝。
+          | 系統 | 檔案 |
+          |---|---|
+          | Windows 10/11 （64 位元） | `InterAct.zip` |
+          | macOS （Apple Silicon 與 Intel 通用） | `InterAct.dmg` |
+
+          **Windows：** 解壓縮後執行資料夾裡的 `InterAct.exe` 即可，免安裝。
           建議解壓到固定位置（例如桌面或文件夾），之後直接從那裡開啟。
+
+          **隨身碟：** 在系統設定儲存後，`InterAct.config.json` 會寫在 EXE 旁。
+          整個資料夾一起帶走即可沿用後端設定；亦可讀取旁邊 `.env` 的公開連線欄位。
+          私密 API 金鑰不會存入此檔；新電腦第一次仍需輸入教師管理金鑰。
+
+          **macOS：** 開啟 `InterAct.dmg`，把 InterAct 拖進「應用程式」。
 
           ## 首次使用
 
@@ -86,18 +292,56 @@ jobs:
           學員端網址留空就好 —— QR Code 會自動帶上你的專案，課堂資料只會進你自己的 Supabase。
 
           尚未建立 Supabase 專案，請參考
-          [部署教學](https://github.com/lienyujen/InterAct/blob/main/docs/InterAct-%E5%BE%9E%E9%9B%B6%E9%83%A8%E7%BD%B2%E8%88%87%E6%89%93%E5%8C%85%E6%95%99%E5%AD%B8.md)。
+          [部署 Step by Step 教學](https://interact.ehuayu.org/about/#deployment)。
+
+          ## InterAct 功能
+
+          InterAct 是教師桌面端搭配學員瀏覽器的即時互動系統，適用於課堂、會議與演講。
+          學員掃描 QR Code 即可加入，不必安裝 App；教師使用自己的 Supabase 後端保存課堂資料。
+
+          - **派題與測驗：** 截圖派題、投票、選擇、是非、問答、口語表達與朗讀發音；自訂測驗可用提示詞指定題數、題型、難度與出題方向，教師可檢視題目、選項並調整正確答案。
+          - **多元作答：** 電寫題、拍照與圖片上傳、討論板、檔案作答、圖上點選、排序與配對。討論板可放大展示及切換匿名顯示。
+          - **全班相機作答：** 選擇 webcam、放大預覽，辨識手指數量、頭頂圈圈／胸前叉叉、舉手、站坐與動作，以及 A4 紙上的文字；教師確認統計後再發布。
+          - **課堂互動：** 即時彈幕、文字派送、文字雲、隨機抽選、搶答與匿名開關。
+          - **評分題：** 截圖經 AI 辨識後，學員點選 1～10 分並送出；教師即時查看回應人數、平均與分布，可勾選 IQR 離群值剔除後平均。原始回答保留，Excel 同時提供原始平均、剔除後平均與剔除筆數。
+          - **課程錄製與語言支援：** 自主控制錄製、字幕顯示與多語即時口譯語音；字幕可設定語言、字型大小、粗體與螢幕位置，學員可選擇可用的口譯語言聆聽。錄製、字幕與口譯預設關閉。
+          - **成果與分析：** 自訂測驗評分與回饋、Exit Ticket、AI 課堂分析、課堂重點整理與 Excel 報告匯出；管理金鑰可管理歷史場次並讀取報告。
+          - **學員介面：** 繁體中文／英文切換，支援題目與 AI 回饋翻譯。
+
+          AI 功能需要自行設定相應 API 金鑰，費用由服務提供者另計；AI 題目、評分與辨識結果請由教師確認。
+          完整操作與授權資訊請見 [InterAct 官方教學網站](https://interact.ehuayu.org/about)。
+
+          ## 從舊版升級
+
+          解壓縮或安裝新版之後，請**再跑一次自動部署**：場次管理 → 系統設定 →
+          展開「還沒建立後端？讓 InterAct 幫你部署」→ 貼上 Supabase 存取權杖 → 開始自動部署。
+
+          新版本可能用到舊資料庫還沒有的資料表或欄位，沒跑這一步的話，用到它們的功能會安靜地失效。
+          部署是可重複執行的，現有的課堂資料不會被動到。
+
+          ## macOS 首次開啟
+
+          兩件事只需要做一次：
+
+          1. **允許開啟。** 安裝檔未經 Apple 簽章，首次開啟會出現「無法打開，因為無法驗證開發者」。
+             請到「系統設定 → 隱私權與安全性」，在下方找到 InterAct 並按「強制打開」。
+             若顯示「已損毀」，請開啟「終端機」執行 `xattr -cr /Applications/InterAct.app` 後再開一次。
+          2. **允許螢幕錄製。** InterAct 的題目都是從螢幕擷取而來，macOS 必須先授權。
+             到「系統設定 → 隱私權與安全性 → 螢幕錄製」開啟 InterAct，**然後重新啟動 InterAct**（這一步不能省略）。
+             使用即時字幕與同步口譯時，也會另外詢問麥克風權限。
 
           ## 注意
 
-          執行檔未經程式碼簽章，Windows SmartScreen 可能顯示「不明發行者」，
+          官方學員網站由 Cloudflare 託管；GitHub repository 設為私人不影響學員使用。
+          自行部署時，請確認你設定的學員網址可以公開存取。
+
+          Windows 的執行檔同樣未經程式碼簽章，SmartScreen 可能顯示「不明發行者」，
           請點「其他資訊 → 仍要執行」。部分公司電腦的資安政策可能直接封鎖。
 
           個人與教育用途免費；補習班、企業內訓與收費課程屬商業用途，
-          請見 [授權說明](https://github.com/lienyujen/InterAct#授權)。
+          請見 [授權說明](https://interact.ehuayu.org/about/#license)。
           MD
           )
-          gh release create "$TAG" \
-            --title "InterAct $TAG" \
-            --notes "$notes" \
-            release/InterAct.zip
+          # Both platform checks and direct uploads must succeed before a new
+          # draft is published or the existing release notes are finalized.
+          gh release edit "$TAG" --repo "$REPO" --title "InterAct $TAG" --notes "$notes" --draft=false

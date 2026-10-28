@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { ArrowDownWideNarrow, Hand, Users, X } from 'lucide-react'
+import { ArrowDownWideNarrow, CircleCheck, ClipboardList, Hand, Plus, UserMinus, Users, X } from 'lucide-react'
+import { ConfirmDialog } from '../components/ConfirmDialog'
+import { RosterManager } from '../components/RosterManager'
 import { getPresenterToken } from '../lib/presenterAuth'
 import { isSupabaseConfigured, requireSupabase } from '../lib/supabase'
 import { useSessionPresence } from '../lib/useSessionPresence'
 import { buzzerWinsFrom, participationRows } from '../lib/participation'
+import { getRoster, getSessionRosterId, matchRoster } from '../lib/classRoster'
+import type { ClassRoster } from '../lib/classRoster'
 import type { ParticipationRow } from '../lib/participation'
-import type { Answer, FileResponse, Message, Participant, Question, SessionCustomQuizResults, SessionEvent } from '../types'
+import type { Answer, BoardPost, FileResponse, Message, Participant, ParticipantPoint, Question, Session, SessionCustomQuizResults, SessionEvent } from '../types'
 
 type SortMode = 'engagement' | 'name' | 'joined'
 
@@ -20,6 +24,22 @@ function minutes(ms: number) {
   return Math.round(ms / 60_000)
 }
 
+// One line of the window. A class list adds a second kind of line to what used
+// to be a straight rendering of the participants table: someone who is on the
+// list and has not turned up has no participant row at all, so everything that
+// hangs off one has to be optional here.
+type RosterRow = {
+  key: string
+  name: string
+  studentNo: string
+  unit: string
+  // Null for a name on the list that nobody has joined under.
+  participation: ParticipationRow | null
+  online: boolean
+  onRoster: boolean
+  points: number
+}
+
 // Its own window so the presenter can keep the roster in view while working,
 // rather than a panel that covers the controls it sits on.
 export function RosterPage() {
@@ -28,54 +48,133 @@ export function RosterPage() {
   const [questions, setQuestions] = useState<Question[]>([])
   const [answers, setAnswers] = useState<Answer[]>([])
   const [messages, setMessages] = useState<Message[]>([])
+  const [points, setPoints] = useState<ParticipantPoint[]>([])
   const [quiz, setQuiz] = useState<SessionCustomQuizResults | null>(null)
+  const [boardPosts, setBoardPosts] = useState<BoardPost[]>([])
+  // Only for current_question_id: with a board staying open alongside the
+  // lesson, the session is the only thing that knows which question the class
+  // is actually on.
+  const [session, setSession] = useState<Session | null>(null)
   const [uploadMarks, setUploadMarks] = useState<FileResponse[]>([])
   const [events, setEvents] = useState<SessionEvent[]>([])
   const [sort, setSort] = useState<SortMode>('engagement')
-  const [calling, setCalling] = useState('')
+  const [roster, setRoster] = useState<ClassRoster | null>(null)
+  const [managerOpen, setManagerOpen] = useState(false)
+  const [busyId, setBusyId] = useState('')
+  const [pendingRemoval, setPendingRemoval] = useState<{ id: string; name: string } | null>(null)
   const [error, setError] = useState('')
-  const onlineParticipantIds = useSessionPresence(sessionId)
+  const { onlineParticipantIds } = useSessionPresence(sessionId, { role: 'presenter' })
+
+  // Read from this computer rather than the database; see lib/classRoster.ts.
+  const readRoster = useCallback(() => {
+    const rosterId = getSessionRosterId(sessionId)
+    setRoster(rosterId ? getRoster(rosterId) : null)
+  }, [sessionId])
+
+  useEffect(() => { readRoster() }, [readRoster])
 
   const load = useCallback(async () => {
     if (!isSupabaseConfigured || !sessionId) return
     const supabase = requireSupabase()
-    const [p, q, a, m, e] = await Promise.all([
+    const [p, q, a, m, e, pt, s] = await Promise.all([
       supabase.from('participants').select('*').eq('session_id', sessionId).order('joined_at').limit(5000),
       supabase.from('questions').select('*').eq('session_id', sessionId).order('created_at').limit(500),
       supabase.from('answers').select('*').eq('session_id', sessionId).limit(10000),
       supabase.from('messages').select('*').eq('session_id', sessionId).limit(5000),
       supabase.from('session_events').select('*').eq('session_id', sessionId).eq('event_type', 'buzzer').limit(2000),
+      supabase.from('participant_points').select('*').eq('session_id', sessionId).limit(5000),
+      supabase.from('sessions').select('*').eq('id', sessionId).maybeSingle(),
     ])
-    setParticipants((p.data || []) as Participant[])
+    // Someone the presenter removed keeps their row, because everything they
+    // answered hangs off it, but they are no longer in the class.
+    setParticipants(((p.data || []) as Participant[]).filter((entry) => !entry.removed_at))
     setQuestions((q.data || []) as Question[])
     setAnswers((a.data || []) as Answer[])
     setMessages((m.data || []) as Message[])
     setEvents((e.data || []) as SessionEvent[])
+    setPoints((pt.data || []) as ParticipantPoint[])
+    setSession((s.data || null) as Session | null)
+    // Say so rather than showing a zero. A missing grant on this table comes back
+    // as an error here and an empty array, so the + button appeared to do nothing
+    // while every tap was in fact being recorded — the failure looked like a
+    // broken button instead of a database that had not been brought up to date.
+    if (pt.error) {
+      setError('讀不到加分紀錄，可能是資料庫還沒更新。請到系統設定重跑一次自動部署。')
+      return
+    }
 
     // Quiz attempts and marked uploads only come back through the presenter
     // action — file_responses is private to the presenter — and the score
     // would be wrong without them.
     const presenterToken = getPresenterToken(sessionId)
     if (!presenterToken) return
-    const [quizResult, uploadResult] = await Promise.all([
+    const [quizResult, uploadResult, boardResult] = await Promise.all([
       supabase.functions.invoke('presenter-action', {
         body: { action: 'get_session_custom_quiz_results', sessionId, presenterToken },
       }),
       supabase.functions.invoke('presenter-action', {
         body: { action: 'get_file_responses', sessionId, presenterToken },
       }),
+      supabase.functions.invoke('presenter-action', {
+        body: { action: 'get_session_board_posts', sessionId, presenterToken },
+      }),
     ])
     if (quizResult.data) setQuiz(quizResult.data as SessionCustomQuizResults)
     setUploadMarks((uploadResult.data?.responses || []) as FileResponse[])
+    setBoardPosts((boardResult.data?.posts || []) as BoardPost[])
   }, [sessionId])
+
+  // A class of 145 writes last_seen_at 4.8 times a second between them, and
+  // every one of those used to pull the whole session back — participants,
+  // answers, up to 5000 messages, questions, events, points and board posts —
+  // and then recompute participation for everyone. The changed row is already
+  // in the payload, so it is applied straight to the list instead.
+  const applyParticipant = useCallback((payload: {
+    eventType: string
+    new: Record<string, unknown>
+    old: Record<string, unknown>
+  }) => {
+    setParticipants((current) => {
+      if (payload.eventType === 'DELETE') {
+        const goneId = payload.old?.id as string | undefined
+        return goneId ? current.filter((entry) => entry.id !== goneId) : current
+      }
+      const row = payload.new as unknown as Participant
+      if (!row?.id || !row.session_id || typeof row.name !== 'string' || !row.joined_at) return current
+      // Removing someone is an UPDATE that sets removed_at, and this list is
+      // built with those filtered out — so applying the row verbatim would put
+      // them straight back.
+      if (row.removed_at) return current.filter((entry) => entry.id !== row.id)
+      // Appended rather than sorted, for the reason given on the presenter's
+      // copy of this: the list is already in joined_at order and the sort read
+      // that field off every row to achieve nothing, which is what crashed.
+      const at = current.findIndex((entry) => entry.id === row.id)
+      if (at < 0) return [...current, row]
+      const next = [...current]
+      next[at] = row
+      return next
+    })
+  }, [])
+
+  // Answers, points and board posts arrive in bursts — a whole class at once —
+  // and they all want the same reload.
+  const reloadTimer = useRef<number | null>(null)
+  const scheduleLoad = useCallback(() => {
+    if (reloadTimer.current !== null) return
+    reloadTimer.current = window.setTimeout(() => {
+      reloadTimer.current = null
+      void load()
+    }, 400)
+  }, [load])
 
   useEffect(() => {
     void load()
     if (!isSupabaseConfigured || !sessionId) return
     const supabase = requireSupabase()
     const channel = supabase.channel(`roster:${sessionId}`)
-    for (const table of ['participants', 'answers', 'messages', 'questions', 'session_events']) {
-      channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `session_id=eq.${sessionId}` }, () => void load())
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'participants', filter: `session_id=eq.${sessionId}` }, applyParticipant)
+    for (const table of ['answers', 'messages', 'questions', 'session_events', 'participant_points', 'board_posts']) {
+      channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `session_id=eq.${sessionId}` }, scheduleLoad)
     }
     channel.subscribe()
     // Attention is reported on a heartbeat rather than as a row change, so the
@@ -83,17 +182,34 @@ export function RosterPage() {
     const timer = window.setInterval(() => void load(), 20_000)
     return () => {
       window.clearInterval(timer)
+      if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current)
       void supabase.removeChannel(channel)
     }
-  }, [load, sessionId])
+  }, [applyParticipant, load, scheduleLoad, sessionId])
 
-  const activeQuestion = useMemo(
-    () => questions.find((question) => question.status === 'active') || null,
-    [questions],
-  )
+  const activeQuestion = useMemo(() => {
+    const current = session?.current_question_id
+      ? questions.find((question) => question.id === session.current_question_id && question.status === 'active')
+      : null
+    if (current) return current
+    // Nothing current, or it has been stopped: fall back to an open question
+    // that is not the board, and only then to the board itself.
+    const openOnes = questions.filter((question) => question.status === 'active')
+    return openOnes.find((question) => question.type !== 'board') || openOnes[0] || null
+  }, [questions, session?.current_question_id])
+
+  const pointsByParticipant = useMemo(() => {
+    const totals = new Map<string, number>()
+    for (const award of points) {
+      totals.set(award.participant_id, (totals.get(award.participant_id) || 0) + award.points)
+    }
+    return totals
+  }, [points])
 
   const rows = useMemo(() => {
     const computed = participationRows({
+      // The class is running, so the absence clock runs to now.
+      endedAt: null,
       participants,
       questions,
       answers,
@@ -101,38 +217,142 @@ export function RosterPage() {
       quizAttempts: quiz?.attempts || [],
       buzzerWins: buzzerWinsFrom(events),
       uploadMarks,
+      boardPosts,
     })
-    const online = (row: ParticipationRow) => onlineParticipantIds.includes(row.participant.id)
-    const scored = computed.some((row) => row.score > 0)
-    return [...computed].sort((a, b) => {
-      // Whoever left is no longer actionable, so they sink regardless of sort.
-      if (online(a) !== online(b)) return online(a) ? -1 : 1
-      if (sort === 'name') return a.participant.name.localeCompare(b.participant.name, 'zh-Hant')
-      if (sort === 'joined') return a.participant.joined_at.localeCompare(b.participant.joined_at)
+    const byParticipantId = new Map(computed.map((row) => [row.participant.id, row]))
+    const online = (participantId: string | null) => Boolean(participantId) && onlineParticipantIds.includes(participantId as string)
+
+    const toRow = (
+      participation: ParticipationRow | null,
+      name: string,
+      studentNo: string,
+      unit: string,
+      onRoster: boolean,
+      key: string,
+    ): RosterRow => ({
+      key,
+      name,
+      studentNo,
+      unit,
+      participation,
+      online: online(participation?.participant.id || null),
+      onRoster,
+      points: participation ? pointsByParticipant.get(participation.participant.id) || 0 : 0,
+    })
+
+    if (!roster) {
+      return computed.map((row) => toRow(row, row.participant.name, '', '', false, row.participant.id))
+    }
+
+    const { matches, matchedParticipantIds } = matchRoster(roster.entries, participants)
+    // The class list first, in the order the presenter put it in, so a teacher
+    // reading down it is reading their own list. The name shown is the one on
+    // the list, not the one the student typed — that is the whole point of
+    // matching, and the two differ by exactly the spacing being ignored.
+    const listed = matches.map(({ entry, participantId }) => toRow(
+      participantId ? byParticipantId.get(participantId) || null : null,
+      entry.name,
+      entry.studentNo,
+      entry.unit,
+      true,
+      entry.id,
+    ))
+    // Whoever typed something that is not on the list still joined, under what
+    // they typed. They are not an error, just not identified.
+    const unlisted = computed
+      .filter((row) => !matchedParticipantIds.has(row.participant.id))
+      .map((row) => toRow(row, row.participant.name, '', '', false, row.participant.id))
+
+    return [...listed, ...unlisted]
+  // boardPosts belongs here: the cards arrive from their own call, so a memo
+  // that did not watch them left 未作答 wrong until something else happened to
+  // change and force a recompute.
+  }, [answers, boardPosts, events, messages, onlineParticipantIds, participants, pointsByParticipant, questions, quiz, roster, uploadMarks])
+
+  const sortedRows = useMemo(() => {
+    const scored = rows.some((row) => (row.participation?.score || 0) > 0)
+    return [...rows].sort((a, b) => {
+      // A raised hand outranks every sort, because it is a question waiting to
+      // be taken and a teacher scanning for one should never have to look past
+      // the top of the list. Longest wait first among them, which is the order
+      // the hands actually went up in.
+      const aHand = a.participation?.participant.hand_raised_at || ''
+      const bHand = b.participation?.participant.hand_raised_at || ''
+      if (Boolean(aHand) !== Boolean(bHand)) return aHand ? -1 : 1
+      if (aHand && bHand && aHand !== bHand) return aHand.localeCompare(bHand)
+      // Whoever is not here is not actionable, so they sink regardless of sort —
+      // and someone on the list who never turned up sinks furthest.
+      if (a.online !== b.online) return a.online ? -1 : 1
+      if (Boolean(a.participation) !== Boolean(b.participation)) return a.participation ? -1 : 1
+      if (sort === 'name') return a.name.localeCompare(b.name, 'zh-Hant')
+      if (sort === 'joined') {
+        const left = a.participation?.participant.joined_at || ''
+        const right = b.participation?.participant.joined_at || ''
+        return left.localeCompare(right)
+      }
       // Before anyone has done anything the scores are all zero and the order
       // would be arbitrary, so fall back to something stable and readable.
-      if (!scored) return a.participant.name.localeCompare(b.participant.name, 'zh-Hant')
-      return b.score - a.score
+      if (!scored) return a.name.localeCompare(b.name, 'zh-Hant')
+      return (b.participation?.score || 0) - (a.participation?.score || 0)
     })
-  }, [answers, events, messages, onlineParticipantIds, participants, questions, quiz, sort, uploadMarks])
+  }, [rows, sort])
 
-  const onlineCount = rows.filter((row) => onlineParticipantIds.includes(row.participant.id)).length
+  const onlineCount = sortedRows.filter((row) => row.online).length
+  const raisedCount = sortedRows.filter((row) => row.participation?.participant.hand_raised_at).length
+  const joinedCount = participants.length
 
-  async function callOn(participantId: string, name: string) {
+  async function callPresenter(body: Record<string, unknown>, failure: string) {
     const presenterToken = getPresenterToken(sessionId)
-    if (!presenterToken) { setError('這個場次沒有講者操作權限。'); return }
-    setCalling(participantId)
-    setError('')
+    if (!presenterToken) { setError('這個場次沒有講者操作權限。'); return false }
     try {
-      const { error: callError } = await requireSupabase().functions.invoke('presenter-action', {
-        body: { action: 'draw_lottery', sessionId, presenterToken, candidateIds: [participantId] },
+      const { data, error: callError } = await requireSupabase().functions.invoke('presenter-action', {
+        body: { ...body, sessionId, presenterToken },
       })
       if (callError) throw callError
-    } catch {
-      setError(`點名「${name}」失敗，請再試一次。`)
-    } finally {
-      setCalling('')
+      if (data?.message && !data?.ok && !data?.point) throw new Error(data.message)
+      setError('')
+      return true
+    } catch (caught) {
+      setError(caught instanceof Error && caught.message ? caught.message : failure)
+      return false
     }
+  }
+
+  // One hand, or every hand at once when the presenter has finished taking
+  // questions. Omitting the id is what means "all of them".
+  async function lowerHands(participantId?: string) {
+    setBusyId(participantId || 'all')
+    if (await callPresenter({ action: 'lower_hands', participantId }, '取消舉手失敗，請再試一次。')) {
+      await load()
+    }
+    setBusyId('')
+  }
+
+  async function award(participantId: string) {
+    setBusyId(participantId)
+    if (await callPresenter({ action: 'award_participant_point', participantId, points: 1 }, '加分失敗，請再試一次。')) {
+      await load()
+    }
+    setBusyId('')
+  }
+
+  async function revoke(participantId: string) {
+    setBusyId(participantId)
+    if (await callPresenter({ action: 'revoke_participant_point', participantId }, '取消加分失敗。')) {
+      await load()
+    }
+    setBusyId('')
+  }
+
+  async function removeParticipant() {
+    if (!pendingRemoval) return
+    const { id } = pendingRemoval
+    setBusyId(id)
+    if (await callPresenter({ action: 'remove_participant', participantId: id }, '移除失敗，請再試一次。')) {
+      await load()
+    }
+    setBusyId('')
+    setPendingRemoval(null)
   }
 
   function cycleSort() {
@@ -143,19 +363,44 @@ export function RosterPage() {
     <main className="roster-window">
       <header className="roster-heading">
         <h1><Users size={17} />線上名單</h1>
-        <button
-          aria-label="關閉線上名單"
-          className="icon-button ghost-button"
-          title="關閉"
-          type="button"
-          onClick={() => window.interactDesktop?.close()}
-        >
-          <X size={18} />
-        </button>
+        <span className="roster-heading-actions">
+          <button
+            aria-label="匯入與編輯學員名單"
+            className="icon-button ghost-button"
+            title="匯入與編輯名單"
+            type="button"
+            onClick={() => setManagerOpen(true)}
+          >
+            <ClipboardList size={18} />
+          </button>
+          <button
+            aria-label="關閉線上名單"
+            className="icon-button ghost-button"
+            title="關閉"
+            type="button"
+            onClick={() => window.interactDesktop?.close()}
+          >
+            <X size={18} />
+          </button>
+        </span>
       </header>
 
       <div className="roster-toolbar">
-        <span className="roster-count">線上 {onlineCount}／共 {rows.length} 人</span>
+        <span className="roster-count">
+          線上 {onlineCount}／已加入 {joinedCount}
+          {roster ? `／名單 ${roster.entries.length} 人` : ' 人'}
+        </span>
+        {raisedCount > 0 && (
+          <button
+            className="roster-hand is-clear"
+            disabled={busyId === 'all'}
+            title="全部取消舉手"
+            type="button"
+            onClick={() => void lowerHands()}
+          >
+            <Hand size={14} />{raisedCount}
+          </button>
+        )}
         <button className="roster-sort" type="button" title="切換排序" onClick={cycleSort}>
           <ArrowDownWideNarrow size={14} />{sortLabels[sort]}
         </button>
@@ -166,59 +411,137 @@ export function RosterPage() {
       )}
       {error && <p className="error roster-error">{error}</p>}
 
-      {rows.length ? (
+      {sortedRows.length ? (
         <ol className="roster-list">
-          {rows.map((row) => {
-            const online = onlineParticipantIds.includes(row.participant.id)
-            const pending = Boolean(activeQuestion) && online && !row.answeredQuestionIds.has(activeQuestion?.id || '')
+          {sortedRows.map((row) => {
+            const participation = row.participation
+            const pending = Boolean(activeQuestion) && row.online
+              && !participation?.answeredQuestionIds.has(activeQuestion?.id || '')
             // Away for a stretch rather than a moment between tabs.
-            const distracted = online && row.unfocusedMs >= 2 * 60_000
+            const distracted = row.online && (participation?.awayMs || 0) >= 2 * 60_000
             const classes = ['roster-row']
-            if (!online) classes.push('is-offline')
+            if (!participation) classes.push('is-absent')
+            else if (!row.online) classes.push('is-offline')
             if (pending) classes.push('is-pending')
             if (distracted) classes.push('is-distracted')
+            const busy = busyId === participation?.participant.id
             return (
-              <li className={classes.join(' ')} key={row.participant.id}>
-                <span className={`roster-dot${online ? ' is-online' : ''}`} />
+              <li className={classes.join(' ')} key={row.key}>
+                {/* The dot's place is taken by the hand while one is up, so the
+                    line reads as "waiting" rather than merely "here", and the
+                    same spot is what the presenter taps to answer it. */}
+                {participation?.participant.hand_raised_at ? (
+                  <button
+                    aria-label={`取消 ${row.name} 的舉手`}
+                    className="roster-hand"
+                    disabled={busy}
+                    title="取消舉手"
+                    type="button"
+                    onClick={() => void lowerHands(participation.participant.id)}
+                  >
+                    <Hand size={15} />
+                  </button>
+                ) : (
+                  <span className={`roster-dot${row.online ? ' is-online' : ''}`} />
+                )}
                 <span className="roster-name">
-                  {row.participant.name}
-                  {row.badges.length > 0 && (
-                    <span className="roster-badges" title={row.badges.map((badge) => `${badge.label}：${badge.detail}`).join('\n')}>
-                      {row.badges.map((badge) => <span key={badge.key}>{badge.icon}</span>)}
+                  {row.name}
+                  {/* A green tick means this line on the class list was claimed by
+                      somebody who actually joined — the one thing a teacher is
+                      scanning for when they take attendance. */}
+                  {row.onRoster && participation && (
+                    <CircleCheck aria-label="已加入" className="roster-present" size={14} />
+                  )}
+                  {participation && participation.badges.length > 0 && (
+                    <span className="roster-badges" title={participation.badges.map((badge) => `${badge.label}：${badge.detail}`).join('\n')}>
+                      {participation.badges.map((badge) => <span key={badge.key}>{badge.icon}</span>)}
                     </span>
                   )}
                 </span>
                 <span className="roster-tags">
+                  {row.studentNo && <span className="roster-tag is-quiet">{row.studentNo}</span>}
+                  {!row.onRoster && roster && <span className="roster-tag is-unlisted">不在名單</span>}
+                  {!participation && <span className="roster-tag is-absent">未到</span>}
                   {pending && <span className="roster-tag is-pending">未作答</span>}
-                  {distracted && <span className="roster-tag is-distracted">離開 {minutes(row.unfocusedMs)} 分</span>}
+                  {distracted && <span className="roster-tag is-distracted">{minutes(participation?.awayMs || 0)} 分</span>}
                 </span>
-                <span
-                  className="roster-score"
-                  title={[
-                    `作答 ${row.answerCount}`,
-                    `答對 ${row.correctCount}`,
-                    `彈幕 ${row.messageCount}`,
-                    `搶答 ${row.quickCount}`,
-                    row.uploadScore !== null ? `上傳作答 ${row.uploadScore} 分` : '',
-                  ].filter(Boolean).join('．')}
-                >
-                  {row.score}
-                </span>
-                <button
-                  aria-label={`點名 ${row.participant.name}`}
-                  className="roster-call"
-                  disabled={!online || calling === row.participant.id}
-                  title="點名這位學員"
-                  type="button"
-                  onClick={() => void callOn(row.participant.id, row.participant.name)}
-                >
-                  <Hand size={14} />
-                </button>
+
+                {/* Nothing below this point applies to a name nobody has joined
+                    under: there is no participant to score, credit or remove. */}
+                {participation && (
+                  <>
+                    {/* One number, because pressing + has to move the number the
+                        presenter is looking at. The split that matters — earned
+                        against awarded — is kept where it can be audited: its own
+                        columns in the exported report. */}
+                    <span
+                      className="roster-score"
+                      title={[
+                        `作答 ${participation.answerCount}`,
+                        `答對 ${participation.correctCount}`,
+                        `彈幕 ${participation.messageCount}`,
+                        `搶答 ${participation.quickCount}`,
+                        participation.uploadScore !== null ? `上傳作答 ${participation.uploadScore} 分` : '',
+                        row.points > 0 ? `老師加分 +${row.points}` : '',
+                      ].filter(Boolean).join('．')}
+                    >
+                      {participation.score + row.points}
+                    </span>
+                    {row.points > 0 && (
+                      <button
+                        className="roster-bonus"
+                        disabled={busy}
+                        title={`其中 ${row.points} 分是老師加的。點一下取消最後一次加分`}
+                        type="button"
+                        onClick={() => void revoke(participation.participant.id)}
+                      >
+                        +{row.points}
+                      </button>
+                    )}
+                    <button
+                      aria-label={`給 ${row.name} 加一分`}
+                      className="roster-award"
+                      disabled={busy}
+                      title="加一分"
+                      type="button"
+                      onClick={() => void award(participation.participant.id)}
+                    >
+                      <Plus size={14} />
+                    </button>
+                    <button
+                      aria-label={`把 ${row.name} 移出名單`}
+                      className="roster-remove"
+                      disabled={busy}
+                      title="移出名單，讓他重新輸入姓名加入"
+                      type="button"
+                      onClick={() => setPendingRemoval({ id: participation.participant.id, name: row.name })}
+                    >
+                      <UserMinus size={14} />
+                    </button>
+                  </>
+                )}
               </li>
             )
           })}
         </ol>
       ) : <p className="muted roster-empty">還沒有學員加入。</p>}
+
+      <RosterManager
+        open={managerOpen}
+        sessionId={sessionId}
+        onChanged={readRoster}
+        onClose={() => { setManagerOpen(false); readRoster() }}
+      />
+
+      <ConfirmDialog
+        busy={Boolean(busyId)}
+        confirmLabel="移出名單"
+        description={`「${pendingRemoval?.name || ''}」會離開這個場次，之後要重新輸入姓名才能加入。他已經送出的作答與訊息都會保留，也仍然會出現在課後報表裡。`}
+        open={Boolean(pendingRemoval)}
+        title="要把這位學員移出名單嗎？"
+        onCancel={() => setPendingRemoval(null)}
+        onConfirm={() => void removeParticipant()}
+      />
     </main>
   )
 }

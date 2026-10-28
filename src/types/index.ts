@@ -6,6 +6,9 @@ export type Session = {
   danmaku_enabled: boolean
   anonymous_enabled: boolean
   current_question_id: string | null
+  // The 討論板 that is open, which is not the same as the question the class is
+  // on: a board stays reachable while the lesson moves on to other questions.
+  board_question_id: string | null
   short_join_url: string | null
   exit_ticket_prompt: string | null
   exit_ticket_prompt_en: string | null
@@ -48,6 +51,21 @@ export type Participant = {
   last_seen_at: string
   unfocused_ms?: number
   focus_streak_ms?: number
+  // Set when the presenter removed them. The row and everything hanging off it
+  // stays; it simply drops out of the live roster and lets that device rejoin.
+  removed_at?: string | null
+  // When they asked to be called on. Null once the presenter acknowledges it.
+  hand_raised_at?: string | null
+}
+
+// One tap of the + beside a name. Kept per award rather than as a total so the
+// report can show what the points were for, and a mistaken tap can be traced.
+export type ParticipantPoint = {
+  id: string
+  session_id: string
+  participant_id: string
+  points: number
+  created_at: string
 }
 
 export type Message = {
@@ -71,7 +89,56 @@ export type Screenshot = {
   created_at: string
 }
 
-export type QuestionType = 'send_screen' | 'poll' | 'multiple_choice' | 'true_false' | 'short_answer' | 'pronunciation' | 'oral_response' | 'custom_quiz' | 'file_upload'
+export type QuestionType = 'send_screen' | 'poll' | 'rating' | 'multiple_choice' | 'true_false' | 'short_answer' | 'pronunciation' | 'oral_response' | 'custom_quiz' | 'file_upload' | 'drawing' | 'hotspot' | 'ordering' | 'matching' | 'board' | 'camera_poll'
+
+export type CameraPollResult = {
+  counts: number[]
+  unknownCount: number
+  totalDetected: number
+  confidence: number
+  notes: string
+  mode?: 'gestures' | 'poster'
+  paperResponses?: string[]
+}
+
+// The kinds of card a student can put on a 討論板.
+export type BoardPostKind = 'text' | 'link' | 'image' | 'file' | 'audio' | 'drawing'
+
+export type BoardPost = {
+  id: string
+  session_id: string
+  question_id: string
+  participant_id: string
+  participant_name: string
+  kind: BoardPostKind
+  body: string | null
+  url: string | null
+  storage_path: string | null
+  mime_type: string | null
+  file_size: number | null
+  duration_ms: number | null
+  // Set on a reply; null on a card of its own.
+  reply_to: string | null
+  anonymous_at_display: boolean
+  // The student corrected it after posting.
+  edited_at?: string | null
+  // The student took it back down.
+  deleted_at: string | null
+  // The presenter took it down for everyone.
+  hidden_at: string | null
+  pinned_at: string | null
+  created_at: string
+  // Filled in by whoever loaded the card rather than stored: a playable or
+  // viewable address for the uploaded file, and who reacted to it.
+  public_url?: string | null
+  reactions?: BoardReaction[]
+}
+
+export type BoardReaction = {
+  post_id: string
+  participant_id: string
+  emoji: string
+}
 export type QuizItemType = 'multiple_choice' | 'fill_blank' | 'short_answer'
 export type QuizRequestedType = 'random' | QuizItemType
 export type ExitTicketCategory = 'lesson_summary' | 'learning_assessment' | 'course_satisfaction' | 'student_question'
@@ -151,6 +218,31 @@ export type Question = {
   // Null means untimed; src/lib/questionTiming.ts decides which types carry which.
   prepare_seconds: number | null
   answer_seconds: number | null
+  // How many points one student may drop on a hotspot image; null elsewhere.
+  max_pins: number | null
+  // Matching only: the right-hand column the class picks from, shuffled.
+  // Ordering keeps its items in options, so it needs nothing here.
+  choices: string[]
+  // 排序題 only: the pieces are one sentence cut up rather than a list to rank.
+  sentence_mode: boolean
+  // Whether the class is shown the capture this question was made from.
+  share_screenshot: boolean
+  // 討論板: which kinds of card the class may put up. Empty is the plain
+  // 派送畫面 this type has always been — a board is the same dispatch with
+  // replies switched on.
+  board_formats: BoardPostKind[]
+  // How many cards one student may put up; null is the ∞ option.
+  board_max_posts: number | null
+  // When the presenter opened the board to the class. Until then each student
+  // sees only their own cards.
+  board_revealed_at: string | null
+  // Whole-class camera response. The camera frame is analyzed transiently and
+  // discarded; only the teacher-approved aggregate is stored and broadcast.
+  camera_gesture_map: string[]
+  camera_result: CameraPollResult | null
+  camera_published_at: string | null
+  // Bumped by 再做一次; answers carry the round they were given in.
+  answer_round: number
   started_at: string | null
   stopped_at: string | null
   created_at: string
@@ -166,6 +258,7 @@ export type Answer = {
   answer_values: string[] | null
   answer_text: string | null
   is_correct: boolean | null
+  round: number
   submitted_at: string
 }
 
@@ -344,6 +437,9 @@ export type ParticipantQuizData = {
   items: QuizItem[]
   attempt: QuizAttempt | null
   answers: QuizItemAnswer[]
+  // What each item would have accepted. Empty while the quiz is still
+  // open, because then it is still the answer.
+  keys?: Array<{ item_id: string; accepted_answers: string[] }>
 }
 
 export type PresenterQuizResults = ParticipantQuizData & {
@@ -387,10 +483,27 @@ export type ExitTicket = {
   submitted_at: string
 }
 
+// A line of the class list as the report needs it. Declared here rather than
+// imported from lib/classRoster so the type layer keeps pointing one way.
+export type ReportRosterEntry = {
+  id: string
+  name: string
+  studentNo: string
+  unit: string
+}
+
 export type SessionReportData = {
   session: Session
   participants: Participant[]
+  participantPoints: ParticipantPoint[]
+  // The class list this session was taught against, read off this computer. Null
+  // when the presenter did not use one — then the report is exactly what it was.
+  roster: { name: string; entries: ReportRosterEntry[] } | null
   messages: Message[]
+  // Every card put on a 討論板, including the ones a student took back and the
+  // ones the presenter took down — what was written is part of what happened
+  // in the room even when it was not left up.
+  boardPosts: BoardPost[]
   sharedContents: SharedContent[]
   captionSegments: CaptionSegment[]
   screenshots: Screenshot[]

@@ -17,6 +17,10 @@ declare global {
     interactDesktop?: {
       isDesktop: boolean
       platform: string
+      getPortableBackendConfig?: () =>
+        | { ok: true; path: string; hasFile: boolean; source: 'json' | 'env' | null; config: { ref: string; key: string; appUrl?: string } | null }
+        | { ok: false; path: string; hasFile: true; message: string }
+      savePortableBackendConfig?: (config: { ref: string; key: string; appUrl?: string }) => { ok: true } | { ok: false; message: string }
       enterPresenterMode: (sessionId: string) => Promise<void>
       setPresenterExpanded: (expanded: boolean, settingsOpen?: boolean, interactiveOpen?: boolean) => Promise<void>
       setLotteryInteraction: (enabled: boolean) => Promise<void>
@@ -28,6 +32,11 @@ declare global {
       openWordCloud: (sessionId: string) => Promise<void>
       openRoster: (sessionId: string) => Promise<void>
       openCustomQuizReview: (sessionId: string, questionId: string) => Promise<void>
+      openHotspotReview: (sessionId: string, questionId: string) => Promise<void>
+      openBoardReview: (sessionId: string, questionId: string) => Promise<void>
+      openSubmissionReview: (sessionId: string, questionId: string) => Promise<void>
+      openOrderingReview: (sessionId: string, questionId: string) => Promise<void>
+      openCameraPoll: (sessionId: string) => Promise<void>
       minimize: () => Promise<void>
       close: () => Promise<void>
       listCaptureSources: () => Promise<InterActCaptureSource[]>

@@ -144,6 +144,24 @@ using (
   )
 );
 
+-- Tables added after the original hardening: keep their reads within the
+-- class. The board's own reveal policy still applies alongside these checks.
+drop policy if exists "members only: participant points" on public.participant_points;
+create policy "members only: participant points" on public.participant_points as restrictive for select
+to anon, authenticated using (public.interact_member_of(session_id));
+
+drop policy if exists "members only: board posts" on public.board_posts;
+create policy "members only: board posts" on public.board_posts as restrictive for select
+to anon, authenticated using (public.interact_member_of(session_id));
+
+drop policy if exists "members only: board reactions" on public.board_reactions;
+create policy "members only: board reactions" on public.board_reactions as restrictive for select
+to anon, authenticated using (
+  exists (select 1 from public.board_posts p
+          where p.id = board_reactions.post_id
+            and public.interact_member_of(p.session_id))
+);
+
 -- ---- INSERT: the row's participant must be the caller -------------------------
 -- schema.sql's permissive insert policies keep all their content checks
 -- (active session, live question, deadlines, lengths); these only add "and it
@@ -159,6 +177,10 @@ to anon, authenticated with check (public.interact_owns_participant(participant_
 
 drop policy if exists "own participant only: exit_tickets" on public.exit_tickets;
 create policy "own participant only: exit_tickets" on public.exit_tickets as restrictive for insert
+to anon, authenticated with check (public.interact_owns_participant(participant_id));
+
+drop policy if exists "own participant only: board posts" on public.board_posts;
+create policy "own participant only: board posts" on public.board_posts as restrictive for insert
 to anon, authenticated with check (public.interact_owns_participant(participant_id));
 
 -- Names from the first (permissive-rewrite) version of this file; harmless if absent.

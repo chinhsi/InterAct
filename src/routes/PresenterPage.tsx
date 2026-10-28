@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPresenterQuestionFocus } from '../lib/presenterQuestionFocus'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { PresenterControlPanel } from '../components/PresenterControlPanel'
@@ -10,7 +11,9 @@ import { QRCodePanel } from '../components/QRCodePanel'
 import { ExitTicketResult } from '../components/ExitTicketResult'
 import { LotteryOverlay } from '../components/LotteryOverlay'
 import { QuestionEditor } from '../components/QuestionEditor'
-import type { QuestionTiming } from '../components/QuestionEditor'
+import { CameraPollCaptureModal } from '../components/CameraPollCaptureModal'
+import { CameraPollResult } from '../components/CameraPollResult'
+import type { DispatchRequest, GeneratedItems } from '../components/QuestionEditor'
 import type { CustomQuizSettings } from '../lib/customQuiz'
 import { QuestionHistory } from '../components/QuestionHistory'
 import { QuestionResult } from '../components/QuestionResult'
@@ -20,6 +23,7 @@ import { TextDispatchModal } from '../components/TextDispatchModal'
 import { FileTransferModal } from '../components/FileTransferModal'
 import { finalizeLottery } from '../lib/lottery'
 import { getPresenterToken } from '../lib/presenterAuth'
+import { sliceRegions } from '../lib/sliceImage'
 import { endManagedSession } from '../lib/presenterSessions'
 import { isBuzzerPending } from '../lib/buzzer'
 import { buildJoinUrl } from '../lib/qrcode'
@@ -27,11 +31,13 @@ import { createRealtimeCaptionConnection } from '../lib/liveCaptions'
 import { createGeminiCaptionConnection } from '../lib/geminiCaptions'
 import { createInterpretationAudioBroadcaster } from '../lib/liveInterpretation'
 import { logDiagnostic } from '../lib/diagnostics'
+import { createCoalescedLoader } from '../lib/coalescedLoad'
 import { createCaptionTextNormalizer } from '../lib/traditionalChinese'
 import { SOURCE_CAPTION_LANGUAGE, resolvedCaptionLanguage } from '../lib/captionLanguages'
 import { isSupabaseConfigured, requireSupabase } from '../lib/supabase'
+import { useStandingsBroadcast } from '../lib/standings'
 import { useSessionPresence } from '../lib/useSessionPresence'
-import type { AiSummary, Answer, AudioResponse, BuzzerSessionEvent, ExitTicket, FileResponse, SharedFile, LotterySessionEvent, Participant, PresenterQuizResults, Question, QuestionAnalysis, QuestionType, Session, SessionEvent } from '../types'
+import type { AiSummary, Answer, AudioResponse, BuzzerSessionEvent, CameraPollResult as CameraPollResultData, ExitTicket, FileResponse, SharedFile, LotterySessionEvent, Participant, PresenterQuizResults, Question, QuestionAnalysis, Session, SessionEvent } from '../types'
 import { useParams } from 'react-router-dom'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
@@ -65,7 +71,17 @@ async function edgeFunctionErrorMessage(error: unknown, fallback: string) {
       const payload = await context.clone().json() as { message?: unknown }
       if (typeof payload.message === 'string' && payload.message.trim()) return payload.message.trim()
     } catch {
-      // Fall back to the SDK error message when the response is not JSON.
+      // Not JSON, which is what a function that crashed outright rather than
+      // returning a reason looks like. The SDK's own message for that is
+      // "Edge Function returned a non-2xx status code", which says nothing a
+      // presenter or a maintainer can act on — so say what actually came back.
+      try {
+        const body = (await context.clone().text()).trim().replace(/\s+/g, ' ')
+        if (body) return `${fallback}（HTTP ${context.status}：${body.slice(0, 200)}）`
+      } catch {
+        // Body already consumed or unreadable; fall through to the status.
+      }
+      return `${fallback}（HTTP ${context.status}）`
     }
   }
   return error instanceof Error && error.message ? error.message : fallback
@@ -78,6 +94,7 @@ export function PresenterPage() {
   const [questions, setQuestions] = useState<Question[]>([])
   const [answerCounts, setAnswerCounts] = useState<Record<string, number>>({})
   const [selectedQuestionId, setSelectedQuestionId] = useState<string | null>(null)
+  const questionFocus = useMemo(() => createPresenterQuestionFocus(sessionId), [sessionId])
   const [question, setQuestion] = useState<Question | null>(null)
   const [answers, setAnswers] = useState<Answer[]>([])
   const [audioResponses, setAudioResponses] = useState<AudioResponse[]>([])
@@ -98,6 +115,13 @@ export function PresenterPage() {
   const [fileResponses, setFileResponses] = useState<FileResponse[]>([])
   const [collectQuestion, setCollectQuestion] = useState<Question | null>(null)
   const [fileBusyId, setFileBusyId] = useState('')
+  // The presenter never needed the dispatched image back until 圖上點選, which
+  // draws the class's taps onto it.
+  const [questionScreenshotUrl, setQuestionScreenshotUrl] = useState<string | null>(null)
+  // The ordering or matching answer. Kept here rather than read off the question
+  // because it lives in a table the browser has no read grant on.
+  const [orderingKey, setOrderingKey] = useState<string[] | null>(null)
+  const preparedShotRef = useRef<{ screenshotId: string; storagePath: string; file: File } | null>(null)
   // Read by the polling timer, which must not overwrite a row mid-marking.
   const markingRef = useRef(false)
   const [gradeProgress, setGradeProgress] = useState<{ done: number; total: number } | null>(null)
@@ -106,7 +130,12 @@ export function PresenterPage() {
   const [settingsError, setSettingsError] = useState('')
   const [captionError, setCaptionError] = useState('')
   const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([])
+  const [cameras, setCameras] = useState<MediaDeviceInfo[]>([])
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState(() => localStorage.getItem('interact:caption-microphone') || '')
+  const [selectedCameraId, setSelectedCameraId] = useState(() => localStorage.getItem('interact:camera-device') || '')
+  const [cameraPollRequest, setCameraPollRequest] = useState<DispatchRequest | null>(null)
+  const [cameraPollResult, setCameraPollResult] = useState<CameraPollResultData | null>(null)
+  const [cameraPollError, setCameraPollError] = useState('')
   const [lotteryEvent, setLotteryEvent] = useState<LotterySessionEvent | null>(null)
   const [buzzerEvent, setBuzzerEvent] = useState<BuzzerSessionEvent | null>(null)
   const [captureFile, setCaptureFile] = useState<File | null>(null)
@@ -146,7 +175,14 @@ export function PresenterPage() {
     [session?.code, sessionId],
   )
   const [joinUrl, setJoinUrl] = useState(fallbackJoinUrl)
-  const onlineParticipantIds = useSessionPresence(sessionId)
+  const { onlineParticipantIds } = useSessionPresence(sessionId, { role: 'presenter' })
+  // Worked out here rather than in the roster window, which is only open when
+  // the teacher opens it, and sent to each student as their own line.
+  useStandingsBroadcast(sessionId, `${participants.length}:${onlineParticipantIds.join("|")}`)
+  const raisedCount = useMemo(
+    () => participants.filter((participant) => participant.hand_raised_at && !participant.removed_at).length,
+    [participants],
+  )
   const onlineParticipants = useMemo(
     () => participants.filter((participant) => onlineParticipantIds.includes(participant.id)),
     [onlineParticipantIds, participants],
@@ -192,36 +228,86 @@ export function PresenterPage() {
     }, 180))
   }, [])
 
-  const loadAll = useCallback(async () => {
-    if (!isSupabaseConfigured || !sessionId) return
+  // Every student's page reports "still here" every 30 seconds, and that
+  // writes last_seen_at on their participants row. With the class list
+  // subscribed to every change on that table, a room of 145 produced 4.8 full
+  // reloads a second — 40 queries and 700 rows a second, none of it because
+  // anybody had done anything. Dispatching a screenshot then had to queue
+  // behind all of it, which is what the room actually noticed.
+  //
+  // The row we need is in the payload, so apply it and ask for nothing.
+  const applyParticipantChange = useCallback((payload: {
+    eventType: string
+    new: Record<string, unknown>
+    old: Record<string, unknown>
+  }) => {
+    setParticipants((current) => {
+      if (payload.eventType === 'DELETE') {
+        const goneId = payload.old?.id as string | undefined
+        return goneId ? current.filter((entry) => entry.id !== goneId) : current
+      }
+      const row = payload.new as unknown as Participant
+      if (!row?.id || !row.session_id || typeof row.name !== 'string' || !row.joined_at) return current
+      const at = current.findIndex((entry) => entry.id === row.id)
+      // Appended, not sorted. The list arrives ordered by joined_at and someone
+      // we have not seen before joined last, so the order holds — and sorting
+      // read joined_at off every row in the list to achieve nothing. One row
+      // somewhere had no joined_at, and the whole presenter screen died on it
+      // mid-dispatch. Which row is still unknown, hence the note below.
+      if (at < 0) {
+        if (!row.joined_at) {
+          void window.interactDesktop?.logDiagnostic?.({
+            event: 'participant_without_joined_at',
+            eventType: payload.eventType,
+            keys: Object.keys(payload.new || {}).sort().join(','),
+          })
+        }
+        return [...current, row]
+      }
+      const next = [...current]
+      next[at] = row
+      return next
+    })
+  }, [])
+
+  const reload = useRef(createCoalescedLoader())
+  const loadAll = useCallback(() => reload.current(async () => {
+    if (!isSupabaseConfigured || !sessionId || navigator.onLine === false) return
+    const snapshot = questionFocus.snapshot()
+    try {
 
     const supabase = requireSupabase()
-    const [{ data: sessionData }, { data: participantData }, { data: questionListData }, { data: answerQuestionData }, { data: exitTicketData }] = await Promise.all([
+    const initial = await Promise.all([
       supabase.from('sessions').select('*').eq('id', sessionId).single(),
       supabase.from('participants').select('*').eq('session_id', sessionId).order('joined_at'),
       supabase.from('questions').select('*').eq('session_id', sessionId).order('created_at'),
       supabase.from('answers').select('question_id').eq('session_id', sessionId),
       supabase.from('exit_tickets').select('*').eq('session_id', sessionId).order('submitted_at'),
     ])
+    const readError = initial.find((result) => result.error)?.error
+    if (readError) throw readError
+    const [{ data: sessionData }, { data: participantData }, { data: questionListData }, { data: answerQuestionData }, { data: exitTicketData }] = initial
+    if (!sessionData) return
 
     const nextSession = sessionData as Session | null
     const nextQuestions = (questionListData || []) as Question[]
+    const focus = questionFocus.reconcile(snapshot, nextSession?.current_question_id || null, nextQuestions.map(item => item.id))
+    if (!focus) return
     setSession(nextSession)
     setParticipants((participantData || []) as Participant[])
     setQuestions(nextQuestions)
     setExitTickets((exitTicketData || []) as ExitTicket[])
-    setAnswerCounts((answerQuestionData || []).reduce<Record<string, number>>((counts, answer) => {
+    const nextAnswerCounts = (answerQuestionData || []).reduce<Record<string, number>>((counts, answer) => {
       counts[answer.question_id] = (counts[answer.question_id] || 0) + 1
       return counts
-    }, {}))
+    }, {})
+    for (const item of nextQuestions) if (item.type === 'camera_poll' && item.camera_result) nextAnswerCounts[item.id] = item.camera_result.totalDetected
+    setAnswerCounts(nextAnswerCounts)
 
-    const selectedStillExists = selectedQuestionId && nextQuestions.some((item) => item.id === selectedQuestionId)
-    const targetQuestionId = selectedStillExists
-      ? selectedQuestionId
-      : nextSession?.current_question_id || nextQuestions.at(-1)?.id || null
+    const targetQuestionId = focus.questionId
 
     if (targetQuestionId) {
-      const [{ data: questionData }, { data: answerData }, { data: summaryData }] = await Promise.all([
+      const detail = await Promise.all([
         supabase.from('questions').select('*').eq('id', targetQuestionId).single(),
         supabase.from('answers').select('*').eq('question_id', targetQuestionId).order('submitted_at'),
         supabase
@@ -234,7 +320,11 @@ export function PresenterPage() {
           .limit(1)
           .maybeSingle(),
       ])
-      if (targetQuestionId !== selectedQuestionId) setSelectedQuestionId(targetQuestionId)
+      const detailError = detail.find((result) => result.error)?.error
+      if (detailError) throw detailError
+      if (!questionFocus.accepts(snapshot)) return
+      const [{ data: questionData }, { data: answerData }, { data: summaryData }] = detail
+      setSelectedQuestionId(targetQuestionId)
       setQuestion(questionData as Question | null)
       setAnswers((answerData || []) as Answer[])
       setAnalysis(((summaryData as AiSummary | null)?.output_json as QuestionAnalysis | undefined) || null)
@@ -242,9 +332,11 @@ export function PresenterPage() {
       if (loadedQuestion?.type === 'custom_quiz') {
         const presenterToken = getPresenterToken(sessionId)
         if (presenterToken) {
-          const { data: quizData } = await supabase.functions.invoke('presenter-action', {
+          const { data: quizData, error: quizError } = await supabase.functions.invoke('presenter-action', {
             body: { action: 'get_custom_quiz_results', sessionId, presenterToken, questionId: targetQuestionId },
           })
+          if (quizError) throw quizError
+          if (!questionFocus.accepts(snapshot)) return
           setQuizResults((quizData as PresenterQuizResults | null) || null)
         }
         setAudioResponses([])
@@ -255,7 +347,19 @@ export function PresenterPage() {
           const { data: recordingData } = await supabase.functions.invoke('presenter-action', {
             body: { action: 'get_recording_results', sessionId, presenterToken, questionId: targetQuestionId },
           })
-          setAudioResponses((recordingData?.responses || []) as AudioResponse[])
+          // The server signs a fresh URL every time this is asked for, so a
+          // plain replace changes every <audio src> on each realtime event and
+          // the player the presenter is listening to jumps back to the start.
+          // The URL that is already playing stays; only the rest is taken.
+          const nextResponses = (recordingData?.responses || []) as AudioResponse[]
+          if (!questionFocus.accepts(snapshot)) return
+          setAudioResponses((current) => {
+            const playing = new Map(current.map((item) => [item.id, item.signed_url]))
+            return nextResponses.map((item) => {
+              const existing = playing.get(item.id)
+              return existing ? { ...item, signed_url: existing } : item
+            })
+          })
         }
       } else {
         setQuizResults(null)
@@ -268,11 +372,36 @@ export function PresenterPage() {
       setQuizResults(null)
       setAnalysis(null)
     }
-  }, [selectedQuestionId, sessionId])
+    } catch (error) {
+      logDiagnostic('presenter_reload_failed', { message: error instanceof Error ? error.message : String(error) })
+      // Keep the last successful classroom snapshot while reconnecting.
+    }
+  }), [questionFocus, sessionId])
+
+  // A whole class answering at once is 145 INSERTs in a couple of seconds, and
+  // every one of them used to mean another full reload. They all want the same
+  // thing, so the first one waits a moment and the rest join it.
+  const reloadTimer = useRef<number | null>(null)
+  const scheduleReload = useCallback(() => {
+    if (reloadTimer.current !== null) return
+    reloadTimer.current = window.setTimeout(() => {
+      reloadTimer.current = null
+      void loadAll()
+    }, 400)
+  }, [loadAll])
+
+  useEffect(() => () => {
+    if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current)
+  }, [])
 
   useEffect(() => {
     loadAll()
   }, [loadAll])
+
+  useEffect(() => {
+    window.addEventListener('online', scheduleReload)
+    return () => window.removeEventListener('online', scheduleReload)
+  }, [scheduleReload])
 
   useEffect(() => {
     if (!session || recordingStateRecoveredRef.current) return
@@ -340,12 +469,12 @@ export function PresenterPage() {
     const supabase = requireSupabase()
     const channel = supabase
       .channel(`presenter:${sessionId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, loadAll)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'participants', filter: `session_id=eq.${sessionId}` }, loadAll)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'questions', filter: `session_id=eq.${sessionId}` }, loadAll)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'answers', filter: `session_id=eq.${sessionId}` }, loadAll)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'screenshots', filter: `session_id=eq.${sessionId}` }, loadAll)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'exit_tickets', filter: `session_id=eq.${sessionId}` }, loadAll)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'participants', filter: `session_id=eq.${sessionId}` }, applyParticipantChange)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'questions', filter: `session_id=eq.${sessionId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'answers', filter: `session_id=eq.${sessionId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'screenshots', filter: `session_id=eq.${sessionId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'exit_tickets', filter: `session_id=eq.${sessionId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'session_events', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const event = payload.new as SessionEvent
         if (event.event_type === 'buzzer') {
@@ -356,11 +485,11 @@ export function PresenterPage() {
           setBuzzerEvent(null)
         }
       })
-      .subscribe()
+      .subscribe((status) => { if (status === 'SUBSCRIBED') scheduleReload() })
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [loadAll, sessionId])
+  }, [applyParticipantChange, loadAll, scheduleReload, sessionId])
 
   useEffect(() => {
     if (!isSupabaseConfigured || !sessionId) return
@@ -373,33 +502,43 @@ export function PresenterPage() {
     }
   }, [sessionId])
 
-  const refreshMicrophones = useCallback(async () => {
+  const refreshMediaDevices = useCallback(async () => {
     setSettingsError('')
+    const attempts = await Promise.allSettled([
+      navigator.mediaDevices.getUserMedia({ audio: true }),
+      navigator.mediaDevices.getUserMedia({ video: true }),
+    ])
+    attempts.forEach((attempt) => { if (attempt.status === 'fulfilled') attempt.value.getTracks().forEach((track) => track.stop()) })
     try {
-      const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      permissionStream.getTracks().forEach((track) => track.stop())
       const devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'audioinput')
       setMicrophones(devices)
+      const videoDevices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'videoinput')
+      setCameras(videoDevices)
       if (selectedMicrophoneId && !devices.some((device) => device.deviceId === selectedMicrophoneId)) {
         setSelectedMicrophoneId('')
         localStorage.removeItem('interact:caption-microphone')
       }
+      if (selectedCameraId && !videoDevices.some((device) => device.deviceId === selectedCameraId)) {
+        setSelectedCameraId('')
+        localStorage.removeItem('interact:camera-device')
+      }
+      if (attempts.every((attempt) => attempt.status === 'rejected')) setSettingsError('無法讀取麥克風與相機，請檢查系統權限。')
     } catch (error) {
       setSettingsError(microphoneErrorMessage(error))
     }
-  }, [selectedMicrophoneId])
+  }, [selectedCameraId, selectedMicrophoneId])
 
   useEffect(() => {
     if (!settingsOpen) return
-    const handleDeviceChange = () => void refreshMicrophones()
+    const handleDeviceChange = () => void refreshMediaDevices()
     navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange)
     return () => navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange)
-  }, [refreshMicrophones, settingsOpen])
+  }, [refreshMediaDevices, settingsOpen])
 
   function openPresenterSettings() {
     setSettingsError('')
     setSettingsOpen(true)
-    void refreshMicrophones()
+    void refreshMediaDevices()
   }
 
   useEffect(() => {
@@ -709,7 +848,7 @@ export function PresenterPage() {
     await updateSession({ captions_enabled: !session.captions_enabled })
   }
 
-  async function savePresenterSettings(settings: PresenterCaptionSettings, microphoneId: string) {
+  async function savePresenterSettings(settings: PresenterCaptionSettings, microphoneId: string, cameraId: string) {
     if (!session) return
     const presenterToken = getPresenterToken(session.id)
     if (!presenterToken) {
@@ -743,8 +882,11 @@ export function PresenterPage() {
       const nextSession = data.session as Session
       setSession(nextSession)
       setSelectedMicrophoneId(microphoneId)
+      setSelectedCameraId(cameraId)
       if (microphoneId) localStorage.setItem('interact:caption-microphone', microphoneId)
       else localStorage.removeItem('interact:caption-microphone')
+      if (cameraId) localStorage.setItem('interact:camera-device', cameraId)
+      else localStorage.removeItem('interact:camera-device')
       setSettingsOpen(false)
       if (captionsWereActive) {
         await startCourseRecording(nextSession, microphoneId)
@@ -770,32 +912,128 @@ export function PresenterPage() {
     void interpretationAudioContextRef.current?.close()
   }, [clearCaptionDisplayTimers])
 
-  async function uploadQuestionScreenshot(file: File, type: QuestionType, options: string[], allowMultiple: boolean, promptText: string, timing: QuestionTiming, quizSettings?: CustomQuizSettings) {
+  // Uploads the capture once and remembers it, so the AI read and the dispatch
+  // that follows it share a single screenshot.
+  async function prepareScreenshot(file: File) {
+    const cached = preparedShotRef.current
+    if (cached && cached.file === file) return cached
+    const presenterToken = getPresenterToken(sessionId)
+    if (!presenterToken) throw new Error('找不到講者權限，請重新加入場次。')
+    const supabase = requireSupabase()
+    const { data: prepared, error: prepareError } = await supabase.functions.invoke('presenter-action', {
+      body: { action: 'prepare_screenshot_upload', sessionId, presenterToken, fileName: file.name },
+    })
+    if (prepareError) throw new Error(await edgeFunctionErrorMessage(prepareError, '無法準備截圖上傳。'))
+    if (!prepared?.screenshotId || !prepared?.storagePath || !prepared?.uploadToken) {
+      throw new Error(prepared?.message || '無法準備截圖上傳。')
+    }
+    const { error: uploadError } = await supabase.storage
+      .from('interact-screenshots')
+      .uploadToSignedUrl(prepared.storagePath, prepared.uploadToken, file, {
+        contentType: file.type || 'image/png',
+        upsert: false,
+      })
+    if (uploadError) throw uploadError
+    const next = { screenshotId: prepared.screenshotId as string, storagePath: prepared.storagePath as string, file }
+    preparedShotRef.current = next
+    return next
+  }
+
+  // So the class is not handed the answer in reading order.
+  function shuffle<T>(list: T[]) {
+    const copy = [...list]
+    for (let index = copy.length - 1; index > 0; index -= 1) {
+      const target = Math.floor(Math.random() * (index + 1))
+      ;[copy[index], copy[target]] = [copy[target], copy[index]]
+    }
+    return copy
+  }
+
+  // 圖片排序: the AI picks the blocks, the presenter's machine cuts them out of
+  // the capture it already holds, and the class reorders the pieces. Nothing is
+  // shown in between — the tiles in their correct order would give it away.
+  async function buildSlicedOptions(file: File, direction: string, count: number) {
+    const presenterToken = requirePresenterToken()
+    const prepared = await prepareScreenshot(file)
+    const generated = await callPresenter({
+      action: 'generate_question_items',
+      sessionId,
+      presenterToken,
+      kind: 'regions',
+      storagePath: prepared.storagePath,
+      direction,
+      count,
+    }, 'AI 分割圖片失敗。') as { regions?: Array<{ box: number[]; label: string }> }
+
+    const regions = generated.regions || []
+    if (regions.length < 2) {
+      throw new Error('AI 在這張截圖裡找不到可以排序的區塊，換一張或在題目欄說明要排什麼。')
+    }
+    const slices = await sliceRegions(file, regions)
+    if (slices.length < 2) throw new Error('切出來的區塊太小，換一張截圖再試。')
+
+    // Uploaded one at a time rather than all at once: this runs on classroom
+    // wifi, and a burst of parallel uploads is how they start failing.
+    const supabase = requireSupabase()
+    const urls: string[] = []
+    for (const slice of slices) {
+      const spot = await callPresenter({
+        action: 'prepare_screenshot_upload', sessionId, presenterToken, fileName: slice.name,
+      }, '無法準備圖片上傳。')
+      const { error } = await supabase.storage.from('interact-screenshots')
+        .uploadToSignedUrl(spot.storagePath as string, spot.uploadToken as string, slice, {
+          contentType: 'image/png', upsert: false,
+        })
+      if (error) throw error
+      const { data } = supabase.storage.from('interact-screenshots').getPublicUrl(spot.storagePath as string)
+      urls.push(data.publicUrl)
+    }
+    return urls
+  }
+
+  async function generateQuestionItems(kind: 'ordering' | 'matching', direction: string): Promise<GeneratedItems> {
+    if (!captureFile) throw new Error('找不到截圖，請重新截圖。')
+    const presenterToken = requirePresenterToken()
+    const prepared = await prepareScreenshot(captureFile)
+    const data = await callPresenter({
+      action: 'generate_question_items', sessionId, presenterToken,
+      storagePath: prepared.storagePath, kind, direction,
+    }, 'AI 出題失敗。')
+    return data as GeneratedItems
+  }
+
+  async function uploadQuestionScreenshot(file: File, request: DispatchRequest) {
+    const { type, allowMultiple, promptText, timing, key, maxPins, sentenceMode, shareScreenshot, quizSettings } = request
+    const options = request.options
     const presenterToken = getPresenterToken(sessionId)
     if (!presenterToken) throw new Error('找不到講者權限，請重新加入場次。')
     setBusy(true)
     try {
       const supabase = requireSupabase()
-      const { data: prepared, error: prepareError } = await supabase.functions.invoke('presenter-action', {
-        body: {
-          action: 'prepare_screenshot_upload',
-          sessionId,
-          presenterToken,
-          fileName: file.name,
-        },
-      })
-      if (prepareError) throw new Error(await edgeFunctionErrorMessage(prepareError, '無法準備截圖上傳。'))
-      if (!prepared?.screenshotId || !prepared?.storagePath || !prepared?.uploadToken) {
-        throw new Error(prepared?.message || '無法準備截圖上傳。')
+      // Reuses the upload the AI already read, when there was one.
+      const prepared = await prepareScreenshot(file)
+
+      // 配對題 is written here rather than in the dialog and is never drawn on the
+      // way past: the presenter dispatches with their screen on the projector, so a
+      // preview of the pairs would hand the class the answers.
+      let dispatchOptions = options
+      let dispatchKey = key
+      if (type === 'matching') {
+        const generated = await generateQuestionItems('matching', promptText)
+        const pairs = generated.pairs || []
+        if (pairs.length < 2) throw new Error('AI 在這張截圖裡找不到可以配對的內容，換一張或在出題方向欄說明要配什麼。')
+        dispatchOptions = pairs.map((pair) => pair.left)
+        const answers = pairs.map((pair) => pair.right)
+        dispatchKey = { choices: shuffle(answers), correctValues: answers }
       }
 
-      const { error: uploadError } = await supabase.storage
-        .from('interact-screenshots')
-        .uploadToSignedUrl(prepared.storagePath, prepared.uploadToken, file, {
-          contentType: file.type || 'image/png',
-          upsert: false,
-        })
-      if (uploadError) throw uploadError
+      // 排序題 with 圖片分割 ticked: the options are tiles cut from the capture,
+      // shuffled for the class, and the answer is the order the AI read them in.
+      if (type === 'ordering' && request.sliceCount) {
+        const tiles = await buildSlicedOptions(file, promptText, request.sliceCount)
+        dispatchOptions = shuffle(tiles)
+        dispatchKey = { choices: [], correctValues: request.sliceHasAnswer ? tiles : [] }
+      }
 
       const { data, error } = await supabase.functions.invoke('presenter-action', {
         body: type === 'custom_quiz' ? {
@@ -814,16 +1052,26 @@ export function PresenterPage() {
           screenshotId: prepared.screenshotId,
           storagePath: prepared.storagePath,
           questionType: type,
-          options,
+          options: dispatchOptions,
           allowMultiple,
           prepareSeconds: timing.prepareSeconds,
           answerSeconds: timing.answerSeconds,
+          maxPins,
+          sentenceMode,
+          shareScreenshot,
+          boardFormats: request.boardFormats,
+          boardMaxPosts: request.boardMaxPosts,
+          boardSelfPaced: request.boardSelfPaced,
+          choices: dispatchKey.choices,
+          correctValues: dispatchKey.correctValues,
           promptText,
+          cameraGestureMap: request.cameraGestureMap,
+          cameraResult: type === 'camera_poll' ? request.cameraResult : null,
         },
       })
       if (error) throw new Error(await edgeFunctionErrorMessage(error, '截圖派題失敗。'))
       if (!data?.question) throw new Error(data?.message || '建立題目失敗。')
-      setSelectedQuestionId(data.question.id)
+      showDispatchedQuestion(data.question as Question)
     } finally {
       setBusy(false)
     }
@@ -857,9 +1105,17 @@ export function PresenterPage() {
     try {
       const source = await window.interactDesktop.startCaptureSelection()
       setCaptureSource(source)
-    } catch {
+    } catch (error) {
       setSelectionMode(false)
-      await window.interactDesktop.finishCaptureSelection(false)
+      setControlsOpen(true)
+      const message = error instanceof Error ? error.message : '無法取得螢幕畫面。'
+      setAnalysisError(`截圖無法開始：${message}`)
+      void window.interactDesktop.logDiagnostic({ event: 'capture-start-failed', message })
+      try {
+        await window.interactDesktop.finishCaptureSelection(false)
+      } catch {
+        // The main process already attempts to restore the presenter window.
+      }
     }
   }
 
@@ -877,7 +1133,7 @@ export function PresenterPage() {
     canvas.height = Math.max(1, Math.round(rect.height * scaleY))
 
     const context = canvas.getContext('2d')
-    if (!context) return
+    if (!context) throw new Error('無法建立截圖畫布，請重新截圖。')
 
     context.drawImage(
       image,
@@ -937,14 +1193,19 @@ export function PresenterPage() {
     setSelectionRect(rect)
   }
 
-  function cancelSelection() {
+  async function cancelSelection() {
     activeSelectionPointerId.current = null
     selectionStartRef.current = null
     selectionRectRef.current = null
     setSelectionMode(false)
     setCaptureSource(null)
     setSelectionRect(null)
-    window.interactDesktop?.finishCaptureSelection(false)
+    try {
+      await window.interactDesktop?.finishCaptureSelection(true)
+    } catch (error) {
+      logDiagnostic('capture_restore_failed', { message: String(error) })
+    }
+    returnToClassView()
   }
 
   function finishSelection(event: ReactPointerEvent<HTMLDivElement>) {
@@ -961,21 +1222,158 @@ export function PresenterPage() {
     }
 
     if (rect.width < 16 || rect.height < 16) {
-      cancelSelection()
+      void cancelSelection()
       return
     }
 
     setSelectionRect(rect)
-    cropCapture(rect)
+    void cropCapture(rect).catch(async error => {
+      setCaptureFile(null)
+      setCapturePreviewUrl(null)
+      setAnalysisError(`截圖裁切失敗：${error instanceof Error ? error.message : '請重新截圖。'}`)
+      await cancelSelection()
+    })
   }
 
-  async function createScreenshotQuestion(type: QuestionType, options: string[], allowMultiple: boolean, promptText: string, timing: QuestionTiming, quizSettings?: CustomQuizSettings) {
+  // Where every dispatch ends up. Sending something to the class is always
+  // followed by watching the class answer it, so the dialog that sent it closes
+  // and the panel that shows the answers opens. Without this the screen you land
+  // on depends on which button you happened to press: 截圖派題 collapses to the
+  // QR window, because taking the screenshot hid the controls and nothing brought
+  // them back, while the others simply leave their own dialog covering the view.
+  function returnToClassView() {
+    setEditorOpen(false)
+    setFileTransferOpen(false)
+    setTextDispatchOpen(false)
+    setSettingsOpen(false)
+    setEndClassConfirmOpen(false)
+    setCloseConfirmOpen(false)
+    setControlsOpen(true)
+    // React may already hold these flags after a slow dispatch. Still reset
+    // native bounds rather than depend on a state change to run the effect.
+    void window.interactDesktop?.setPresenterExpanded(true, false, false)
+      .catch(error => logDiagnostic('presenter_return_failed', { message: String(error) }))
+  }
+
+  function showDispatchedQuestion(created: Question) {
+    questionFocus.dispatch(created.id)
+    setSelectedQuestionId(created.id)
+    setSession(current => current ? { ...current, current_question_id: created.id,
+      ...(created.type === 'board' ? { board_question_id: created.id } : {}),
+    } : current)
+    setQuestions(current => [
+      ...current.filter(item => item.id !== created.id).map(item => (item.type !== 'board' || created.type === 'board') && item.status === 'active'
+        ? { ...item, status: 'stopped' as const } : item), created,
+    ])
+    setQuestion(created)
+    setAnswers([])
+    setAudioResponses([])
+    setQuizResults(null)
+    setAnalysis(null)
+    setOrderingKey(null)
+    setQuestionScreenshotUrl(null)
+    returnToClassView()
+    void loadAll()
+  }
+
+  function cancelCameraPoll() {
+    localStorage.removeItem(`interact:camera-draft:${sessionId}`)
+    setCameraPollRequest(null)
+    setCameraPollResult(null)
+    setCaptureFile(null)
+    setCapturePreviewUrl(null)
+    returnToClassView()
+  }
+
+  async function analyzeCameraPoll(imageDataUrl: string) {
+    if (!cameraPollRequest) return
+    setCameraPollError('')
+    setBusy(true)
+    try {
+      const data = await callPresenter({
+        action: 'analyze_camera_poll',
+        sessionId,
+        presenterToken: requirePresenterToken(),
+        imageDataUrl,
+        options: cameraPollRequest.options,
+        gestureMap: cameraPollRequest.cameraGestureMap,
+        promptText: cameraPollRequest.promptText,
+      }, 'AI 姿勢分析失敗。') as { result?: CameraPollResultData }
+      if (!data.result) throw new Error('AI 沒有回傳可用的統計。')
+      setCameraPollResult(data.result)
+    } catch (error) {
+      setCameraPollError(error instanceof Error ? error.message : 'AI 姿勢分析失敗。')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function publishCameraPoll(result: CameraPollResultData, editedRequest?: DispatchRequest) {
+    if (!captureFile || !cameraPollRequest) return
+    setCameraPollResult(result)
+    setCameraPollError('')
+    try {
+      // Pass the reviewed result explicitly because React state is asynchronous.
+      const request = editedRequest || cameraPollRequest
+      await uploadQuestionScreenshot(captureFile, { ...request, cameraResult: result })
+      const channel = new BroadcastChannel(`interact:camera-poll:${sessionId}`)
+      channel.postMessage({ type: 'published' })
+      channel.close()
+      localStorage.removeItem(`interact:camera-draft:${sessionId}`)
+      setCameraPollRequest(null)
+      setCameraPollResult(null)
+      setCaptureFile(null)
+      setCapturePreviewUrl(null)
+      returnToClassView()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '發布相機作答失敗。'
+      setCameraPollError(message)
+      const channel = new BroadcastChannel(`interact:camera-poll:${sessionId}`)
+      channel.postMessage({ type: 'published', error: message })
+      channel.close()
+    }
+  }
+
+  useEffect(() => {
+    if (!cameraPollRequest || !window.interactDesktop) return
+    const channel = new BroadcastChannel(`interact:camera-poll:${sessionId}`)
+    channel.onmessage = (event) => {
+      if (event.data?.type === 'cancelled') { cancelCameraPoll(); return }
+      if (event.data?.type === 'publish' && event.data.result && event.data.request?.type === 'camera_poll') {
+        void publishCameraPoll(event.data.result, event.data.request)
+      }
+    }
+    return () => channel.close()
+  })
+
+  async function createScreenshotQuestion(request: DispatchRequest) {
     if (!captureFile) return
 
     setAnalysisError('')
-    setEditorOpen(false)
+    if (request.type === 'camera_poll') {
+      setEditorOpen(false)
+      setCameraPollRequest(request)
+      setCameraPollResult(null)
+      setCameraPollError('')
+      setControlsOpen(true)
+      if (window.interactDesktop) {
+        localStorage.setItem(`interact:camera-draft:${sessionId}`, JSON.stringify(request))
+        try { await window.interactDesktop.openCameraPoll(sessionId) }
+        catch (error) {
+          cancelCameraPoll()
+          setAnalysisError(error instanceof Error ? error.message : '無法開啟相機作答視窗。')
+        }
+      }
+      return
+    }
+    // Before the upload, not after. Closing the dialog on its own left nothing open
+    // and controlsOpen still false from the screen capture, so the window collapsed
+    // to the QR code for as long as the upload took and then expanded again — a
+    // round trip through a window nobody asked to see. Opening the class view in
+    // the same tick means it never collapses.
+    returnToClassView()
     try {
-      await uploadQuestionScreenshot(captureFile, type, options, allowMultiple, promptText, timing, quizSettings)
+      await uploadQuestionScreenshot(captureFile, request)
       setCaptureFile(null)
       setCapturePreviewUrl(null)
     } catch (error) {
@@ -985,7 +1383,10 @@ export function PresenterPage() {
   }
 
   function cancelQuestionEditor() {
-    setEditorOpen(false)
+    // Also the class view: taking a screenshot collapsed the window, so closing
+    // the dialog without dispatching would otherwise drop the presenter onto the
+    // QR code rather than back where they started.
+    returnToClassView()
     setCaptureFile(null)
     setCapturePreviewUrl(null)
   }
@@ -1022,6 +1423,49 @@ export function PresenterPage() {
     })
     if (error) throw new Error(await edgeFunctionErrorMessage(error, '恢復作答失敗。'))
     if (!data?.question) throw new Error(data?.message || '恢復作答失敗。')
+  }
+
+  // Putting an earlier question back in front of the class. Everything else
+  // here acts on session.current_question_id, so a question that scrolled into
+  // the history had no controls at all — including one left 'active' behind a
+  // newer one, which no student could see and no button could reach.
+  async function recallQuestion(questionId: string) {
+    const presenterToken = getPresenterToken(sessionId)
+    if (!presenterToken) throw new Error('找不到講者權限，請重新加入場次。')
+    const { data, error } = await requireSupabase().functions.invoke('presenter-action', {
+      body: { action: 'recall_question', sessionId, presenterToken, questionId },
+    })
+    if (error) throw new Error(await edgeFunctionErrorMessage(error, '重新派送失敗。'))
+    if (!data?.question) throw new Error(data?.message || '重新派送失敗。')
+    // The class is on it again, so the panel should be too.
+    showDispatchedQuestion(data.question as Question)
+  }
+
+  // The same question asked again after the class has argued about it. The
+  // first round stays put; the comparison is the point.
+  async function nextRound() {
+    if (!session?.current_question_id) return
+    const presenterToken = getPresenterToken(sessionId)
+    if (!presenterToken) throw new Error('找不到講者權限，請重新加入場次。')
+    const { data, error } = await requireSupabase().functions.invoke('presenter-action', {
+      body: { action: 'next_round', sessionId, presenterToken, questionId: session.current_question_id },
+    })
+    if (error) throw new Error(await edgeFunctionErrorMessage(error, '無法開始新的一輪。'))
+    if (!data?.question) throw new Error(data?.message || '無法開始新的一輪。')
+  }
+
+  // Set after the fact as often as up front: the presenter can dispatch an
+  // ordering question cold, let the class argue, then say what the answer was.
+  // Every answer already in is re-marked, so the students see their result.
+  async function setOrderingAnswer(values: string[]) {
+    if (!question || !['ordering', 'matching'].includes(question.type)) return
+    const presenterToken = getPresenterToken(sessionId)
+    if (!presenterToken) throw new Error('找不到講者權限，請重新加入場次。')
+    const data = await callPresenter({
+      action: 'set_ordering_key', sessionId, presenterToken, questionId: question.id, correctValues: values,
+    }, '設定答案失敗。')
+    setOrderingKey((data.correctValues || []) as string[])
+    await loadAll()
   }
 
   async function setCorrectAnswer(answer: string) {
@@ -1068,7 +1512,7 @@ export function PresenterPage() {
       // still unmarked gets marked first. One request per student, not per file:
       // a whole class in a single call would outlive the function that sent it.
       // Work already paid for is skipped, and one unreadable photo stops nothing.
-      if (question.type === 'file_upload') {
+      if (question.type === 'file_upload' || question.type === 'drawing') {
         const unmarked = fileResponses.filter((item) => item.question_id === question.id
           && ['pending', 'failed'].includes(item.analysis_status))
         // Marking is per student, so a submission of three pages is one unit of
@@ -1198,6 +1642,7 @@ export function PresenterPage() {
       setLotteryEvent(null)
       setBuzzerEvent(nextEvent)
       await window.interactDesktop?.showLottery(nextEvent)
+      returnToClassView()
     } catch (error) {
       setAnalysisError(error instanceof Error ? error.message : '搶答啟動失敗。')
     } finally {
@@ -1216,7 +1661,31 @@ export function PresenterPage() {
     if (!data?.event) throw new Error(data?.message || '搶答沒有成功開始。')
     const nextEvent = data.event as BuzzerSessionEvent
     setBuzzerEvent(nextEvent)
+    returnToClassView()
     await window.interactDesktop?.showLottery(nextEvent)
+  }
+
+  // Clearing every raised hand at once, from the count in the panel. Lowering
+  // them one at a time lives in the roster, beside the name being answered.
+  async function lowerHands() {
+    const presenterToken = getPresenterToken(sessionId)
+    if (!presenterToken) throw new Error('找不到講者操作權限。')
+    const { error } = await requireSupabase().functions.invoke('presenter-action', {
+      body: { action: 'lower_hands', sessionId, presenterToken },
+    })
+    if (error) throw error
+  }
+
+  // Calling off a round nobody buzzed on. Without this the only way past the
+  // overlay is to start another one.
+  async function cancelBuzzer() {
+    const presenterToken = getPresenterToken(sessionId)
+    if (!presenterToken) throw new Error('找不到講者操作權限。')
+    const { error } = await requireSupabase().functions.invoke('presenter-action', {
+      body: { action: 'cancel_buzzer', sessionId, presenterToken },
+    })
+    if (error) throw error
+    setBuzzerEvent(null)
   }
 
   async function drawUnanswered(questionId: string) {
@@ -1282,6 +1751,7 @@ export function PresenterPage() {
     if (!data?.event) throw new Error(data?.message || '抽籤沒有回傳結果。')
     const nextEvent = data.event as LotterySessionEvent
     setLotteryEvent(nextEvent)
+    returnToClassView()
     await window.interactDesktop?.showLottery(nextEvent)
   }
 
@@ -1342,7 +1812,7 @@ export function PresenterPage() {
     const presenterToken = requirePresenterToken()
     setBusy(true)
     try {
-      await callPresenter({
+      const data = await callPresenter({
         action: 'create_custom_quiz',
         sessionId,
         presenterToken,
@@ -1351,6 +1821,8 @@ export function PresenterPage() {
         requestedCount: settings.requestedCount,
         requestedType: settings.requestedType,
       }, 'AI 出題失敗。')
+      if (!data?.question) throw new Error('AI 未回傳已建立的題目。')
+      showDispatchedQuestion(data.question as Question)
     } finally {
       setBusy(false)
     }
@@ -1415,7 +1887,7 @@ export function PresenterPage() {
   }, [sessionId])
 
   useEffect(() => {
-    if (question?.type !== 'file_upload') return
+    if (question?.type !== 'file_upload' && question?.type !== 'drawing') return
     void refreshFileResponses()
     if (question.status !== 'active') return
     // Skipped while a mark is in flight: a reply issued before the mark landed
@@ -1426,6 +1898,36 @@ export function PresenterPage() {
     return () => window.clearInterval(timer)
   }, [question?.id, question?.status, question?.type, refreshFileResponses])
 
+  useEffect(() => {
+    const screenshotId = question?.screenshot_id
+    if (!screenshotId) {
+      setQuestionScreenshotUrl(null)
+      return
+    }
+    let cancelled = false
+    void requireSupabase().from('screenshots').select('public_url').eq('id', screenshotId).maybeSingle()
+      .then(({ data }) => { if (!cancelled) setQuestionScreenshotUrl(data?.public_url || null) })
+    return () => { cancelled = true }
+  }, [question?.screenshot_id])
+
+  useEffect(() => {
+    const questionId = question?.id
+    setOrderingKey(null)
+    if (!questionId || !['ordering', 'matching'].includes(question?.type || '')) {
+      setOrderingKey([])
+      return
+    }
+    const presenterToken = getPresenterToken(sessionId)
+    if (!presenterToken) return
+    let cancelled = false
+    void requireSupabase().functions.invoke('presenter-action', {
+      body: { action: 'get_ordering_key', sessionId, presenterToken, questionId },
+    }).then(({ data }) => {
+      if (!cancelled) setOrderingKey((data?.correctValues || []) as string[])
+    })
+    return () => { cancelled = true }
+  }, [question?.id, question?.type, sessionId])
+
   async function startFileCollect(promptText: string) {
     const presenterToken = requirePresenterToken()
     setBusy(true)
@@ -1434,6 +1936,8 @@ export function PresenterPage() {
         action: 'create_file_request', sessionId, presenterToken, promptText,
       }, '無法派送檔案上傳。')
       setCollectQuestion(data.question as Question)
+      if (!data?.question) throw new Error('未回傳上傳作答題目。')
+      showDispatchedQuestion(data.question as Question)
       setFileResponses([])
       await loadAll()
     } finally {
@@ -1495,7 +1999,7 @@ export function PresenterPage() {
       })
       if (error) throw new Error(await edgeFunctionErrorMessage(error, '文字派送失敗。'))
       if (!data?.content) throw new Error(data?.message || '文字派送失敗。')
-      setTextDispatchOpen(false)
+      returnToClassView()
     } catch (error) {
       const message = error instanceof Error ? error.message : '文字派送失敗。'
       logDiagnostic('shared_content_failed', { sessionId, message })
@@ -1534,21 +2038,24 @@ export function PresenterPage() {
   async function closeSessionAndApp() {
     const presenterToken = getPresenterToken(sessionId)
     if (!presenterToken) {
-      setCloseConfirmOpen(false)
-      setAnalysisError('找不到這個場次的講者權限，無法安全結束課程。')
+      await window.interactDesktop?.close()
       return
     }
 
     setClosingSession(true)
     setAnalysisError('')
     try {
-      if (captionConnectionsRef.current.length) await stopCourseRecording()
-      await endManagedSession(sessionId, presenterToken)
+      await Promise.race([
+        (async () => {
+          if (captionConnectionsRef.current.length) await stopCourseRecording()
+          await endManagedSession(sessionId, presenterToken)
+        })(),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 4000)),
+      ])
       await window.interactDesktop?.close()
     } catch (error) {
-      setCloseConfirmOpen(false)
-      setAnalysisError(error instanceof Error ? error.message : '無法結束課程，程式尚未關閉。')
-      setClosingSession(false)
+      logDiagnostic('close_backend_failed', { message: error instanceof Error ? error.message : 'End class failed' })
+      await window.interactDesktop?.close()
     }
   }
 
@@ -1556,18 +2063,21 @@ export function PresenterPage() {
     setClosingSession(true)
     setAnalysisError('')
     try {
-      if (captionConnectionsRef.current.length) await stopCourseRecording()
+      if (captionConnectionsRef.current.length) {
+        await Promise.race([stopCourseRecording(), new Promise<void>((resolve) => window.setTimeout(resolve, 4000))])
+      }
       await window.interactDesktop?.close()
     } catch (error) {
-      setCloseConfirmOpen(false)
-      setAnalysisError(error instanceof Error ? error.message : '暫時中止失敗，程式尚未關閉。')
-      setClosingSession(false)
+      logDiagnostic('close_recording_failed', { message: error instanceof Error ? error.message : 'Recording stop failed' })
+      await window.interactDesktop?.close()
     }
   }
 
   function selectQuestion(questionId: string) {
     setAnalysisError('')
+    questionFocus.select(questionId)
     setSelectedQuestionId(questionId)
+    void loadAll()
   }
 
   if (!session) {
@@ -1604,6 +2114,8 @@ export function PresenterPage() {
           buzzerActive={isBuzzerPending(buzzerEvent)}
           captionError={captionError}
           onlineCount={onlineParticipants.length}
+          raisedCount={raisedCount}
+          onLowerHands={() => void lowerHands()}
           session={session}
           onDrawLottery={drawLottery}
           onStartBuzzer={startBuzzer}
@@ -1626,6 +2138,7 @@ export function PresenterPage() {
           onToggleRecording={toggleCourseRecording}
           onToggleCaptionVisibility={toggleCaptionVisibility}
         />
+        {analysisError && !editorOpen && <p className="error presenter-action-error">{analysisError}</p>}
         <QuestionHistory
           activeQuestionId={session.current_question_id}
           answerCounts={answerCounts}
@@ -1633,13 +2146,14 @@ export function PresenterPage() {
           selectedQuestionId={selectedQuestionId}
           onSelect={selectQuestion}
         />
-        {question?.type === 'custom_quiz' ? (
+        {question?.type === 'camera_poll' ? <CameraPollResult question={question} /> : question?.type === 'custom_quiz' ? (
           <CustomQuizResult
             anonymousEnabled={session.anonymous_enabled}
             onlineCount={onlineParticipants.length}
             question={question}
             results={quizResults}
             isCurrentQuestion={question?.id === session.current_question_id}
+            onRecallQuestion={recallQuestion}
             onStopQuestion={stopQuestion}
             onResumeQuestion={resumeQuestion}
             onUpdateAnswer={updateCustomQuizAnswer}
@@ -1658,6 +2172,7 @@ export function PresenterPage() {
           isCurrentQuestion={question?.id === session.current_question_id}
           onlineCount={onlineParticipants.length}
           question={question}
+          screenshotUrl={questionScreenshotUrl}
           onAnalyze={analyzeQuestion}
           onStopQuestion={stopQuestion}
           onResumeQuestion={resumeQuestion}
@@ -1665,7 +2180,11 @@ export function PresenterPage() {
             setAnalysisError(error instanceof Error ? error.message : 'AI 批改失敗。')
           })}
           onDrawUnanswered={drawUnanswered}
+          onNextRound={nextRound}
+          onRecallQuestion={recallQuestion}
           onSetCorrectAnswer={setCorrectAnswer}
+          orderingKey={orderingKey}
+          onSetOrderingKey={setOrderingAnswer}
         />}
         {session.exit_ticket_prompt && session.exit_ticket_category && (
           <ExitTicketResult
@@ -1720,6 +2239,23 @@ export function PresenterPage() {
         previewUrl={capturePreviewUrl}
         onCancel={cancelQuestionEditor}
         onCreate={createScreenshotQuestion}
+        onGenerate={(direction) => generateQuestionItems('ordering', direction)}
+      />
+      <CameraPollCaptureModal
+        busy={busy}
+        cameraId={selectedCameraId}
+        error={cameraPollError}
+        gestureMap={cameraPollRequest?.cameraGestureMap || []}
+        open={Boolean(cameraPollRequest) && !window.interactDesktop}
+        options={cameraPollRequest?.options || []}
+        result={cameraPollResult}
+        onAnalyze={(imageDataUrl) => void analyzeCameraPoll(imageDataUrl)}
+        onCancel={() => {
+          if (busy) return
+          cancelCameraPoll()
+        }}
+        onPublish={(result) => void publishCameraPoll(result)}
+        onResultChange={setCameraPollResult}
       />
       {fileTransferOpen && (
         <FileTransferModal
@@ -1749,14 +2285,16 @@ export function PresenterPage() {
         busy={settingsBusy}
         error={settingsError}
         microphones={microphones}
+        cameras={cameras}
         open={settingsOpen}
         selectedMicrophoneId={selectedMicrophoneId}
+        selectedCameraId={selectedCameraId}
         session={session}
         onClose={() => {
           if (!settingsBusy) setSettingsOpen(false)
         }}
-        onRefreshMicrophones={() => void refreshMicrophones()}
-        onSave={(settings, microphoneId) => void savePresenterSettings(settings, microphoneId)}
+        onRefreshDevices={() => void refreshMediaDevices()}
+        onSave={(settings, microphoneId, cameraId) => void savePresenterSettings(settings, microphoneId, cameraId)}
       />
       <ConfirmDialog
         busy={busy}
@@ -1786,6 +2324,7 @@ export function PresenterPage() {
       {!window.interactDesktop && (
         <BuzzerOverlay
           event={buzzerEvent}
+          onClose={cancelBuzzer}
           onStart={buzzerEvent ? () => activateBuzzer(buzzerEvent.id) : undefined}
         />
       )}

@@ -9,7 +9,8 @@ import type { Question, QuestionType } from '../types'
 // attempt and an upload by the upload, so neither takes a wall clock — both
 // still honour stop and resume, which is what a teacher reaches for there.
 const timedTypes = new Set<QuestionType>([
-  'poll', 'multiple_choice', 'true_false', 'short_answer', 'pronunciation', 'oral_response',
+  'poll', 'rating', 'multiple_choice', 'true_false', 'short_answer', 'pronunciation', 'oral_response',
+  'hotspot', 'ordering', 'matching',
 ])
 
 // Only a spoken answer has anything to prepare: the pause before speaking is
@@ -52,6 +53,19 @@ export function answerDeadline(question: Pick<Question, 'type' | 'answer_seconds
   if (!question.answer_seconds || !question.started_at) return null
   const startedAt = Date.parse(question.started_at)
   return Number.isFinite(startedAt) ? startedAt + question.answer_seconds * 1000 : null
+}
+
+// The presenter's clock, which covers spoken answers too. Theirs is not a
+// deadline — nothing is refused when it reaches zero, because each student's
+// recorder starts when the question reaches them rather than when it went out.
+// It is "when should the room be done", which is the question a presenter is
+// actually asking while they wait, and it tracks closely enough to answer it.
+export function presenterDeadline(question: Pick<Question, 'type' | 'prepare_seconds' | 'answer_seconds' | 'started_at'>) {
+  if (!question.started_at) return null
+  const total = (question.prepare_seconds || 0) + (question.answer_seconds || 0)
+  if (!total) return null
+  const startedAt = Date.parse(question.started_at)
+  return Number.isFinite(startedAt) ? startedAt + total * 1000 : null
 }
 
 // A quarter-second tick, not one second: a timer woken once a second drifts

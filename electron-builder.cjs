@@ -1,8 +1,8 @@
-// APP_EDITION picks the Windows app to build. It only renames the artifact and
-// its product name; both editions ship the same code, and the caption controls
-// are gated at runtime by VITE_APP_EDITION (see src/lib/edition.ts).
-//   unset / standard -> InterAct.exe
-//   plus             -> InterActPlus.exe
+// APP_EDITION picks which edition to build, on either platform. It only renames
+// the artifact and its product name; both editions ship the same code, and the
+// caption controls are gated at runtime by VITE_APP_EDITION (see src/lib/edition.ts).
+//   unset / standard -> InterAct.exe      / InterAct.dmg
+//   plus             -> InterActPlus.exe  / InterActPlus.dmg
 const productName = process.env.APP_EDITION === 'plus' ? 'InterActPlus' : 'InterAct'
 
 module.exports = {
@@ -31,6 +31,7 @@ module.exports = {
     },
   ],
   win: {
+    extraFiles: [{ from: 'build/InterAct.config.example.json', to: 'InterAct.config.example.json' }],
     icon: 'build/icon.ico',
     executableName: productName,
     requestedExecutionLevel: 'asInvoker',
@@ -48,6 +49,42 @@ module.exports = {
       },
     ],
   },
+  mac: {
+    // electron-builder renders the .icns from this; build/icon.ico is Windows-only
+    // and build/icon.png is 1254px square, well past the 512px minimum.
+    icon: 'build/icon.png',
+    category: 'public.app-category.education',
+    target: [
+      {
+        // One download for both Apple Silicon and Intel. Two architecture-specific
+        // files would be smaller, but the audience is teachers, and "which one is
+        // my Mac?" is a question the download page should not have to answer.
+        target: 'dmg',
+        arch: ['universal'],
+      },
+    ],
+    // There is no Apple Developer ID to sign with, but "no signature at all" is
+    // not an option on Apple Silicon: the kernel refuses to run an arm64 binary
+    // that carries none, and no amount of clearing quarantine helps. '-' is the
+    // ad-hoc identity — worth nothing as an assurance of who built this, but it
+    // is what makes the app launchable once Gatekeeper has been cleared once.
+    // Note that identity: null means something else entirely: skip signing.
+    identity: '-',
+    // Hardened runtime only means anything alongside notarization, and enabling it
+    // unsigned costs the entitlements without buying the trust.
+    hardenedRuntime: false,
+    extendInfo: {
+      // macOS denies these outright when the usage string is absent, and the
+      // failure surfaces to the renderer as an ordinary permission error, so the
+      // feature looks broken rather than unapproved.
+      NSMicrophoneUsageDescription: 'InterAct 使用麥克風提供即時字幕與同步口譯。',
+      NSCameraUsageDescription: 'InterAct 使用相機拍攝全班姿態或學生手持白紙，供講師確認作答辨識結果。',
+      NSScreenCaptureUsageDescription: 'InterAct 需要錄製螢幕，才能把畫面上的內容擷取成題目派送給學員。',
+    },
+  },
+  dmg: {
+    title: productName,
+  },
   nsis: {
     allowElevation: false,
     installerIcon: 'build/icon.ico',
@@ -58,22 +95,5 @@ module.exports = {
   },
   portable: {
     requestExecutionLevel: 'user',
-  },
-  mac: {
-    icon: 'build/icon.png',
-    category: 'public.app-category.education',
-    // Local build: explicit ad-hoc signature ('-'), no notarization. Publishing
-    // to others needs a Developer ID identity plus hardenedRuntime + notarize.
-    identity: '-',
-    hardenedRuntime: false,
-    gatekeeperAssess: false,
-    extendInfo: {
-      NSMicrophoneUsageDescription: 'InterAct 需要麥克風以提供即時字幕與口譯。',
-      NSCameraUsageDescription: 'InterAct 需要攝影機以提供課堂互動功能。',
-    },
-    target: [
-      { target: 'dir', arch: ['arm64'] },
-      { target: 'zip', arch: ['arm64'] },
-    ],
   },
 }

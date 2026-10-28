@@ -39,18 +39,19 @@ function retryableStatus(status: number) {
 }
 
 export function geminiModels(profile: AiProfile) {
+  // Old endpoint aliases now redirect; call their replacements directly even
+  // when an existing deployment still has the old names in its secrets.
+  const currentModel = (model: string) => model === 'gemini-3.7-flash'
+    ? 'gemini-3.8-flash'
+    : model === 'gemini-3.5-flash' ? 'gemini-3.6-flash' : model
   if (profile === 'deep') {
-    const primary = Deno.env.get('GEMINI_DEEP_MODEL') || Deno.env.get('GEMINI_MODEL') || 'gemini-3.7-flash'
-    const fallback = Deno.env.get('GEMINI_DEEP_FALLBACK_MODEL') || Deno.env.get('GEMINI_FALLBACK_MODEL') || 'gemini-3.6-flash'
+    const primary = currentModel(Deno.env.get('GEMINI_DEEP_MODEL') || Deno.env.get('GEMINI_MODEL') || 'gemini-3.8-flash')
+    const fallback = currentModel(Deno.env.get('GEMINI_DEEP_FALLBACK_MODEL') || Deno.env.get('GEMINI_FALLBACK_MODEL') || 'gemini-3.6-flash')
     return fallback === primary ? [primary] : [primary, fallback]
   }
 
-  // Measured on the question-translation call at LOW thinking, two independent
-  // samples: 3.7 answered in 1.1-1.3 s, 3.6 in 1.7-1.9 s, and 3.8 averaged
-  // similarly to 3.7 but spiked to 5.4 s. Newer turned out to be faster here, so
-  // this profile no longer sits a version behind the deep one for latency.
-  const primary = Deno.env.get('GEMINI_REALTIME_MODEL') || 'gemini-3.7-flash'
-  const fallback = Deno.env.get('GEMINI_REALTIME_FALLBACK_MODEL') || 'gemini-3.6-flash'
+  const primary = currentModel(Deno.env.get('GEMINI_REALTIME_MODEL') || 'gemini-3.8-flash')
+  const fallback = currentModel(Deno.env.get('GEMINI_REALTIME_FALLBACK_MODEL') || 'gemini-3.6-flash')
   return fallback === primary ? [primary] : [primary, fallback]
 }
 
