@@ -1054,11 +1054,12 @@ export function QuestionResult(props: Props) {
             {audioResponses.map((response, index) => {
               const result = response.analysis_json
               return (
-                <article className="audio-result-item" key={response.id}>
-                  <div className="audio-result-heading">
+                <details className="audio-result-item" key={response.id}>
+                  <summary className="audio-result-heading">
                     <strong>{anonymousEnabled ? `匿名回答 ${index + 1}` : response.participant_name}</strong>
                     {typeof response.score === 'number' && <span className="audio-result-score">{response.score} 分</span>}
-                  </div>
+                    <span className="muted">{response.analysis_status === 'success' ? '查看評測' : response.analysis_status === 'failed' ? '評測失敗' : '評測處理中'}</span>
+                  </summary>
                   {response.signed_url && <audio controls preload="metadata" src={response.signed_url} />}
                   {response.analysis_status === 'success' && result ? (
                     <>
@@ -1077,7 +1078,7 @@ export function QuestionResult(props: Props) {
                   ) : (
                     <p className="muted">AI 評測仍在處理中。</p>
                   )}
-                </article>
+                </details>
               )
             })}
           </div>
