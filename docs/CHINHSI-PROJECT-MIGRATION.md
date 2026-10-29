@@ -33,3 +33,12 @@
 - 非即時 Gemini `generateContent` 呼叫在 404／408／429／5xx 或逾時時，改以 OpenRouter 的 `google/gemini-3.8-flash` 重試一次；400、401、403 等不可重試錯誤不轉送。支援文字、普通圖片和學生口說題提交的 WAV 錄音；PDF 與其他檔案保持原有 Gemini 兩模型流程。Gemini Live 字幕及 OpenAI 即時口譯不走此備援。此路由仍使用 Google 模型，只是另一把金鑰與 OpenRouter 通道，不能稱跨模型供應商備援。
 - 更新並部署 `analyze-question`、`analyze-session`、`generate-exit-ticket`、`presenter-action`、`participant-action` 到 ref `zgtilyeloepqqyfezmca`。離線測試涵蓋正常 Gemini 不花 OpenRouter、429 切換、400 不重送、圖片／WAV 格式和錯誤遮蔽；用真實 OpenRouter 做一次極小 JSON 請求及一次短合成 WAV 請求，兩次均在模擬 Gemini 429 後成功。新版 Edge 部署後以空白測試場次呼叫 `analyze-session`，繁中和英文報告成功；測試場次 SQL 查已刪除。尚未在 Edge 端強制 Gemini 故障或用真學生錄音驗證備援的整條路徑。
 - 口說題由瀏覽器壓縮錄製，提交前轉為 16 kHz、單聲道、16-bit PCM WAV；約 1.92 MB／分鐘，最長 180 秒約 5.76 MB，後端單檔限制 10 MiB。OpenRouter 備援會再將音訊編成 base64 傳出，資料量約多三分之一；多人同時交長錄音可能形成網路與 AI 服務尖峰。此容量估算不是多人實測結果。討論板上的錄音卡片另保留瀏覽器壓縮格式，不走此口說評測流程。
+
+## 2026-10-29 8934 課堂現場進度與可用功能
+
+- Preview 版的 Mac 建課、QR 指向 Preview 學生網站、Chrome 學生加入、在線人數及學生文字訊息已實測成功。這是新版的基本互動路徑；原 InterAct 和十秒課堂仍為獨立程式。
+- 現場一筆口說題錄音的 `audio_responses.analysis_status='success'`，但題目仍為 `active`，故「綜整全班口說」尚不能啟動。老師需先停止作答；這個介面門檻目前容易被誤認為 AI 卡住。尚未確認現場全班綜整成功，也沒有多人同時錄音測試。
+- 現場搶答顯示「1 人可搶答」但未顯示得主。這是合資格人數，不是成功搶到的人數。資料庫四次事件都無 `winner_id`，Edge 日誌顯示學生 `participant-action` 請求 401；原因為學生端 `claimBuzzer` 漏帶 `participantToken`。修正提交 `9740541` 已推到 Preview main 及 fork 升級分支，TypeScript 通過，Pages run `40845128807` 成功；公開站 index 已更新。學生需重新整理網頁、老師開新一輪並按「開始搶答」再複測。尚未將這次發布視為真人搶答驗收成功；Mac App 不需重裝。
+- 目前可優先用於課堂：QR 加入與文字／彈幕收回饋（基本路徑已測）、抽籤或抽未作答者、老師口頭提出問題後開手機投票或問答。搶答已修正但待重試；口說題已有單人 AI 評測證據，操作時要先停止作答才可做全班綜整。
+- 程式另提供截圖派題、多種題型（投票、選擇、文字問答、排序、配對、圖上點選、電寫、討論板、上傳、口說、自訂測驗）、即時字幕／口譯、匿名、課後 AI 報告、Exit Ticket、Excel 原始紀錄匯出、參與度與名單。這是程式功能清單，不代表 Preview 在本班逐項驗收；截圖需 Mac 螢幕錄製權限，錄音／多人併發、字幕、匯出、Exit Ticket 和實際課堂報告仍待實測。空白測試場次的中英文 AI 報告已成功，不能等同有學生資料的報告。
+- 後續驗收按課堂風險優先：學生重載後搶答得主姓名、口說題停止後全班綜整、課後 Excel 匯出與有資料的報告、截圖權限、錄音／字幕與多人同時提交。現場失敗先看對應 Edge HTTP 狀態與資料庫事件，不直接改正在進行的場次。
