@@ -48,8 +48,9 @@ function fromStorage(): BackendConfig | null {
 function fromBuild(): BackendConfig | null {
   const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
   const key = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
+  const appUrl = import.meta.env.VITE_PUBLIC_APP_URL as string | undefined
   if (!url || !key) return null
-  return { ref: new URL(url).hostname.split('.')[0], url: url.replace(/\/$/, ''), key }
+  return { ref: new URL(url).hostname.split('.')[0], url: url.replace(/\/$/, ''), key, appUrl: appUrl?.replace(/\/$/, '') || undefined }
 }
 
 function remember(config: BackendConfig) {

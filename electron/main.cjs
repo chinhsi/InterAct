@@ -4,6 +4,18 @@ const path = require('node:path')
 const fs = require('node:fs')
 const portableConfig = require('./portableConfig.cjs')
 
+// The preview is installed alongside the classroom version. Electron derives
+// its default profile from package.json (still named InterAct), so a distinct
+// bundle ID alone does not prevent it from opening the old backend and owner
+// key. Separate Chromium storage before app.ready, before any window exists.
+const isPreviewBuild = app.isPackaged && path.basename(process.execPath) === 'InterActPreview'
+if (isPreviewBuild) {
+  const previewDataDir = path.join(app.getPath('appData'), 'InterActPreview')
+  fs.mkdirSync(previewDataDir, { recursive: true })
+  app.setPath('userData', previewDataDir)
+  app.setPath('sessionData', previewDataDir)
+}
+
 function logFatalError(scope, error) {
   const message = `[${new Date().toISOString()}] [${scope}] ${error?.stack || error}\n`
   console.error(message)
@@ -41,7 +53,7 @@ process.on('unhandledRejection', (reason) => logFatalError('unhandledRejection',
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
 const isDesktopDev = process.env.INTERACT_DESKTOP_DEV === '1'
-const APP_USER_MODEL_ID = 'tw.interact.presenter.desktop'
+const APP_USER_MODEL_ID = isPreviewBuild ? 'tw.interact.presenter.preview' : 'tw.interact.presenter.desktop'
 const APP_WINDOW_ICON_PATH = !app.isPackaged
   ? path.join(__dirname, '..', 'build', 'icon.ico')
   : path.join(process.resourcesPath, 'icon.ico')

@@ -14,6 +14,15 @@
 - `OPENAI_API_KEY`／`REURL_API_KEY` 尚未搬。這些不能從舊 Supabase secret 讀回；如需相應功能，須由使用者持有的原始金鑰安全設定，不能把值寫入 repo 或聊天。
 - 目前 GitHub Pages 的 `main` 仍指舊 InterAct Supabase project。切換時須把 repo variables `VITE_SUPABASE_URL`、`VITE_SUPABASE_ANON_KEY` 指向新 project；`VITE_PUBLIC_APP_URL` 維持本人的 Pages 網址。變數與新版前端必須同批切換，不能先改變數讓舊程式讀到新 schema。
 - 原 project 有一個舊 InterAct 場次與一名參與者；本次未搬歷史資料。舊 project 的十秒課堂課堂與回答仍在原處。是否保留歷史 InterAct 場次作封存由使用者決定，不刪原資料。
-- 新 Mac 版尚未在真實桌面、手機和付費 AI 路徑驗收；目前 PR 保持草稿，不能標為已上線。
+- Preview Mac 版已在真實桌面啟動並測試連線；尚未在 Mac UI 完成管理金鑰輸入、開課及真手機掃碼驗收，其他付費 AI 路徑也未驗收；升級 PR 保持草稿。
 
 再次部署時先確認目標 ref，再依序套用 `schema.sql`、`hardening.sql`、部署 Edge Functions，最後用新 project 的 publishable key 及 Keychain owner key 跑 `verify-hardening.mjs`。若要更動其他應用共用的 Auth 設定或 `public.handle_new_user`，先比對本檔與現況。
+
+## 2026-10-29 晚上課堂試用版
+
+- 在 Supabase Dashboard 新增專用 publishable key `interact`。新版學生端另行部署於 <https://chinhsi.github.io/InterAct-preview/>（repo `chinhsi/InterAct-preview`）；Pages workflow 成功。瀏覽器實測學生加入臨時場次並送出訊息，SQL 確認寫入 `interact.messages`；測試場次與訊息已清除。
+- macOS arm64 試用版安裝於 `/Users/chinhsi/Applications/InterActPreview/InterActPreview.app`，DMG 為 `release/InterActPreview.dmg`。Preview 的 Electron userData、sessionData 與可攜設定檔位置均與舊版分開。實際啟動確認專案 ref、publishable key 和學生網址指向新版、管理金鑰欄空白；在 Mac UI 按「測試連線」成功。
+- **使用者仍須親自在 Preview 系統設定貼入新管理金鑰並儲存，才可從 Mac UI 開課。** 金鑰在本機 Keychain service `supabase-interact-target-owner-key`。原 `/Users/chinhsi/Applications/InterAct.app`、`chinhsi/InterAct` main 和 <https://chinhsi.github.io/InterAct/> 仍為舊版，可以作今晚的備用入口。
+- 目前尚未在 Mac UI 實際開課、用真手機掃碼，以及驗證錄音、截圖等功能；升級 PR 仍為草稿。先前完成的 23/23 權限測試、AI 報告測試及學生瀏覽器端加入／發訊息測試各有其測試範圍。
+
+上方「待完成」清單是試用版部署前的紀錄，正式版 Pages 變數尚未切換，Preview 已使用自己的 repo 與變數。
