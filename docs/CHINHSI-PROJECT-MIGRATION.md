@@ -26,3 +26,10 @@
 - 尚未用真手機掃碼，也未驗證錄音、截圖等功能；升級 PR 仍為草稿。先前完成的 23/23 權限測試與 AI 報告測試各有其測試範圍。
 
 上方「待完成」清單是試用版部署前的紀錄，正式版 Pages 變數尚未切換，Preview 已使用自己的 repo 與變數。
+
+## 2026-10-29 OpenRouter 備援
+
+- 使用者指定沿用十秒課堂正在用的 OpenRouter key，不使用另一把舊 key。本機金鑰指紋已與十秒課堂 `TEN_SECOND_OPENROUTER_API_KEY` secret 核對相同；同一值另設於新版 InterAct project 的 `INTERACT_OPENROUTER_API_KEY` Edge secret。值不在 repo、Mac App、Pages 或本文件。十秒課堂的 secret 未改。
+- 非即時 Gemini `generateContent` 呼叫在 404／408／429／5xx 或逾時時，改以 OpenRouter 的 `google/gemini-3.8-flash` 重試一次；400、401、403 等不可重試錯誤不轉送。支援文字、普通圖片和學生口說題提交的 WAV 錄音；PDF 與其他檔案保持原有 Gemini 兩模型流程。Gemini Live 字幕及 OpenAI 即時口譯不走此備援。此路由仍使用 Google 模型，只是另一把金鑰與 OpenRouter 通道，不能稱跨模型供應商備援。
+- 更新並部署 `analyze-question`、`analyze-session`、`generate-exit-ticket`、`presenter-action`、`participant-action` 到 ref `zgtilyeloepqqyfezmca`。離線測試涵蓋正常 Gemini 不花 OpenRouter、429 切換、400 不重送、圖片／WAV 格式和錯誤遮蔽；用真實 OpenRouter 做一次極小 JSON 請求及一次短合成 WAV 請求，兩次均在模擬 Gemini 429 後成功。新版 Edge 部署後以空白測試場次呼叫 `analyze-session`，繁中和英文報告成功；測試場次 SQL 查已刪除。尚未在 Edge 端強制 Gemini 故障或用真學生錄音驗證備援的整條路徑。
+- 口說題由瀏覽器壓縮錄製，提交前轉為 16 kHz、單聲道、16-bit PCM WAV；約 1.92 MB／分鐘，最長 180 秒約 5.76 MB，後端單檔限制 10 MiB。OpenRouter 備援會再將音訊編成 base64 傳出，資料量約多三分之一；多人同時交長錄音可能形成網路與 AI 服務尖峰。此容量估算不是多人實測結果。討論板上的錄音卡片另保留瀏覽器壓縮格式，不走此口說評測流程。

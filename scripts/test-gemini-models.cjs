@@ -21,7 +21,7 @@ assert.equal(models('deep')[0], 'custom-model', 'Explicit non-retired model over
 env.set('GEMINI_REALTIME_MODEL', 'gemini-3.6-flash')
 assert.deepEqual(models('realtime'), ['gemini-3.6-flash'], 'Redirected duplicate fallback is removed')
 for (const level of ['LOW', 'MEDIUM', 'HIGH']) assert.equal(context.exports.geminiThinkingConfig('deep', level).thinkingLevel, level)
-assert.match(fs.readFileSync(path.join(root, 'supabase/functions/analyze-question/index.ts'), 'utf8'), /const models = geminiModels\('realtime'\)/)
+assert.match(fs.readFileSync(path.join(root, 'supabase/functions/analyze-question/index.ts'), 'utf8'), /requestGemini\(requestBodyForModel\(\), 'realtime'\)/)
 const live = fs.readFileSync(path.join(root, 'supabase/functions/gemini-caption-relay/index.ts'), 'utf8')
 assert.match(live, /'gemini-3\.5-transcribe-live'/)
 assert.match(live, /'gemini-3\.5-live-translate-preview'/)

@@ -1,4 +1,4 @@
-import { corsHeaders, jsonResponse, errorDetail, geminiModels } from '../_shared/ai.ts'
+import { corsHeaders, jsonResponse, errorDetail, requestGemini } from '../_shared/ai.ts'
 import { getAdminClient, hashPresenterToken } from '../_shared/supabase.ts'
 import { ratingStats } from '../_shared/rating.ts'
 
@@ -64,40 +64,6 @@ function extractGeminiText(response: Record<string, unknown>) {
   const candidates = Array.isArray(response.candidates) ? response.candidates : []
   const firstCandidate = candidates[0] as { content?: { parts?: Array<{ text?: string }> } } | undefined
   return firstCandidate?.content?.parts?.map((part) => part.text || '').join('') || ''
-}
-
-function retryableStatus(status: number) {
-  return status === 408 || status === 429 || status >= 500
-}
-
-async function requestAnalysis(apiKey: string, models: string[], body: string) {
-  let failureMessage = 'Gemini request failed.'
-
-  for (const [index, model] of models.entries()) {
-    let response: Response
-    try {
-      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-        method: 'POST',
-        headers: {
-          'x-goog-api-key': apiKey,
-          'Content-Type': 'application/json',
-        },
-        body,
-        signal: AbortSignal.timeout(index === 0 ? 12_000 : 18_000),
-      })
-    } catch (error) {
-      failureMessage = error instanceof Error ? error.message : 'Gemini request failed.'
-      console.warn(`Question analysis request failed on ${model}; trying the fallback model.`)
-      continue
-    }
-
-    if (response.ok) return response
-    failureMessage = (await response.text()).slice(0, 1000) || `Gemini request failed (${response.status}).`
-    if (!retryableStatus(response.status)) throw new Error(failureMessage)
-    console.warn(`Question analysis unavailable on ${model}; trying the fallback model.`)
-  }
-
-  throw new Error(failureMessage)
 }
 
 Deno.serve(async (req) => {
@@ -338,8 +304,7 @@ Deno.serve(async (req) => {
       return JSON.stringify({ ...requestPayload, generationConfig })
     }
 
-    const models = geminiModels('realtime')
-    const geminiResponse = await requestAnalysis(geminiKey, models, requestBodyForModel())
+    const geminiResponse = await requestGemini(requestBodyForModel(), 'realtime')
 
     const geminiData = await geminiResponse.json()
     const outputText = extractGeminiText(geminiData)
