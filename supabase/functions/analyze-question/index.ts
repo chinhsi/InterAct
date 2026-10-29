@@ -304,7 +304,14 @@ Deno.serve(async (req) => {
       return JSON.stringify({ ...requestPayload, generationConfig })
     }
 
-    const geminiResponse = await requestGemini(requestBodyForModel(), 'realtime')
+    // A whole-class spoken summary reads every completed individual assessment
+    // and an optional screenshot. The 12s/20s classroom defaults are sized for
+    // one short response and timed out on a real class of 14 recordings.
+    const geminiResponse = await requestGemini(
+      requestBodyForModel(),
+      'realtime',
+      isSpoken ? { primaryTimeoutMs: 45_000, fallbackTimeoutMs: 60_000 } : {},
+    )
 
     const geminiData = await geminiResponse.json()
     const outputText = extractGeminiText(geminiData)

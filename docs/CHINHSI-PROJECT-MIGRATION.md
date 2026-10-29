@@ -36,6 +36,8 @@
 
 ## 2026-10-29 8934 課堂現場進度與可用功能
 
+- 18:42 追查口說全班綜整失敗：該題已停止，14 筆錄音的個別 AI 評測全為 `success`；`analyze-question` 在 10:38:47 UTC 回 500，`ai_summaries` 記錄 `Gemini and OpenRouter unavailable: Signal timed out.`。原程式把這種全班請求套用單題即時分析的 Gemini 12 秒及 OpenRouter 20 秒上限。已只對口說全班綜整提高為 Gemini 45 秒、OpenRouter 60 秒，部署至新 project 的 `analyze-question` v11，並從遠端讀回確認程式含新設定。未重新呼叫真人班級資料，因此目前是逾時修正已發布，完整綜整成功仍待按鈕重試驗證；學生個別評測無需重跑。
+
 - Preview 版的 Mac 建課、QR 指向 Preview 學生網站、Chrome 學生加入、在線人數及學生文字訊息已實測成功。這是新版的基本互動路徑；原 InterAct 和十秒課堂仍為獨立程式。
 - 現場一筆口說題錄音的 `audio_responses.analysis_status='success'`，但題目仍為 `active`，故「綜整全班口說」尚不能啟動。老師需先停止作答；這個介面門檻目前容易被誤認為 AI 卡住。尚未確認現場全班綜整成功，也沒有多人同時錄音測試。
 - 現場搶答顯示「1 人可搶答」但未顯示得主。這是合資格人數，不是成功搶到的人數。資料庫四次事件都無 `winner_id`，Edge 日誌顯示學生 `participant-action` 請求 401；原因為學生端 `claimBuzzer` 漏帶 `participantToken`。修正提交 `9740541` 已推到 Preview main 及 fork 升級分支，TypeScript 通過，Pages run `40845128807` 成功；公開站 index 已更新。學生需重新整理網頁、老師開新一輪並按「開始搶答」再複測。尚未將這次發布視為真人搶答驗收成功；Mac App 不需重裝。
