@@ -3,10 +3,12 @@
 // caption controls are gated at runtime by VITE_APP_EDITION (see src/lib/edition.ts).
 //   unset / standard -> InterAct.exe      / InterAct.dmg
 //   plus             -> InterActPlus.exe  / InterActPlus.dmg
-const productName = process.env.APP_EDITION === 'plus' ? 'InterActPlus' : 'InterAct'
+//   preview          -> InterActPreview.dmg, isolated from the installed InterAct
+const preview = process.env.APP_EDITION === 'preview'
+const productName = preview ? 'InterActPreview' : process.env.APP_EDITION === 'plus' ? 'InterActPlus' : 'InterAct'
 
 module.exports = {
-  appId: 'tw.interact.presenter.desktop',
+  appId: preview ? 'tw.interact.presenter.preview' : 'tw.interact.presenter.desktop',
   productName,
   artifactName: `${productName}.\${ext}`,
   directories: {

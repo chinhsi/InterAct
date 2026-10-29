@@ -187,7 +187,9 @@ export function clearBackendConfig(): SaveResult {
 // caught here instead of halfway through a class.
 export async function testBackendConfig(ref: string, key: string) {
   const response = await fetch(`https://${ref}.supabase.co/rest/v1/sessions?select=id&limit=1`, {
-    headers: { apikey: key, Authorization: `Bearer ${key}` },
+    // This fork hosts InterAct in its own exposed schema. Another application
+    // may already own public.sessions, so probing public gives a false result.
+    headers: { apikey: key, Authorization: `Bearer ${key}`, 'Accept-Profile': 'interact' },
   })
   if (response.ok) return { ok: true as const }
   if (response.status === 401 || response.status === 403) {
