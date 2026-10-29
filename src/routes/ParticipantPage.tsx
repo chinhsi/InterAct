@@ -803,7 +803,7 @@ export function ParticipantPage() {
 
   async function claimBuzzer() {
     const currentBuzzerEvent = buzzerEvent
-    if (session?.status !== 'active' || !participant || !currentBuzzerEvent || !isBuzzerAccepting(currentBuzzerEvent)) return
+    if (session?.status !== 'active' || !participant || !participantToken || !currentBuzzerEvent || !isBuzzerAccepting(currentBuzzerEvent)) return
     setBuzzerBusy(true)
     setError('')
     try {
@@ -812,6 +812,7 @@ export function ParticipantPage() {
           action: 'claim_buzzer',
           sessionId,
           participantId: participant.id,
+          participantToken,
           eventId: currentBuzzerEvent.id,
         },
       })
