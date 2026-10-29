@@ -3,6 +3,7 @@ import { analyzeAudioResponse, removeRecording } from '../_shared/audio-analysis
 import { gradeCustomQuizAttempt } from '../_shared/custom-quiz.ts'
 import { getAdminClient, hashParticipantToken } from '../_shared/supabase.ts'
 import { callerUid } from '../_shared/auth.ts'
+import { attachBoardUrls, BOARD_BUCKET, boardStoragePrefix } from '../_shared/board.ts'
 
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 
@@ -37,12 +38,12 @@ async function verifyParticipant(
   const tokenHash = await hashParticipantToken(participantToken)
   const { data } = await supabase
     .from('participant_session_keys')
-    .select('participant_id, participants!inner(id, session_id, name)')
+    .select('participant_id, participants!inner(id, session_id, name, hand_raised_at)')
     .eq('participant_id', participantId)
     .eq('token_hash', tokenHash)
     .eq('participants.session_id', sessionId)
     .maybeSingle()
-  const participant = data?.participants as unknown as { id: string; session_id: string; name: string } | null
+  const participant = data?.participants as unknown as { id: string; session_id: string; name: string; hand_raised_at: string | null } | null
   return participant || null
 }
 
@@ -198,7 +199,23 @@ Deno.serve(async (req) => {
         focus_streak: focusStreak,
       })
       if (error) throw error
-      return jsonResponse({ ok: true })
+      return jsonResponse({ ok: true, participantState: { id: participant.id, session_id: sessionId, hand_raised_at: participant.hand_raised_at } })
+    }
+
+    // Asking to be called on. A toggle rather than a one-way set, because a
+    // student who puts a hand up and thinks better of it should be able to take
+    // it down without waiting for the presenter to notice.
+    if (action === 'set_hand') {
+      const participant = await verifyParticipant(supabase, sessionId, participantId, participantToken)
+      if (!participant) return jsonResponse({ message: '學員權限失效。' }, 403)
+      const raised = input.raised !== false
+      const { data: updated, error } = await supabase.from('participants')
+        .update({ hand_raised_at: raised ? new Date().toISOString() : null })
+        .eq('id', participantId)
+        .eq('session_id', sessionId)
+        .select('*').single()
+      if (error) throw error
+      return jsonResponse({ ok: true, participantState: updated })
     }
 
     if (['get_custom_quiz', 'submit_custom_quiz', 'retry_custom_quiz_grading'].includes(action)) {
@@ -230,7 +247,17 @@ Deno.serve(async (req) => {
           if (error) throw error
           answers = data || []
         }
-        return jsonResponse({ quiz, items: items || [], attempt: attempt || null, answers })
+        // Once the quiz is over, what the right answers were. A student who
+        // is told a score and not what they should have written has been
+        // given a mark, not a lesson.
+        let keys: unknown[] = []
+        if (question.status !== 'active' && (items || []).length) {
+          const { data } = await supabase.from('quiz_item_keys')
+            .select('item_id, accepted_answers')
+            .in('item_id', (items || []).map((item) => item.id))
+          keys = data || []
+        }
+        return jsonResponse({ quiz, items: items || [], attempt: attempt || null, answers, keys })
       }
 
       if (!quiz) return jsonResponse({ message: '自訂測驗仍在出題中，請稍候。' }, 409)
@@ -335,13 +362,244 @@ Deno.serve(async (req) => {
     }
 
 
+    // Ordering and matching are filed here rather than straight into `answers`,
+    // because the key they are marked against is deliberately out of the
+    // student's reach — comparing the two has to happen on this side.
+    if (action === 'submit_ordered_answer') {
+      const participant = await verifyParticipant(supabase, sessionId, participantId, participantToken)
+      if (!participant) return jsonResponse({ message: '學員權限驗證失敗，請重新掃描 QR Code 加入。' }, 403)
+      const questionId = typeof input.questionId === 'string' ? input.questionId : ''
+      if (!validUuid(questionId)) return jsonResponse({ message: '題目資料不正確。' }, 400)
+      const values = Array.isArray(input.values)
+        ? input.values.filter((value: unknown): value is string => typeof value === 'string')
+          .map((value) => value.slice(0, 500)).slice(0, 20)
+        : []
+      if (!values.length) return jsonResponse({ message: '請先完成作答。' }, 400)
+
+      const { data: question, error: questionError } = await supabase.from('questions')
+        .select('id, type, status, options, answer_round, answer_seconds, started_at')
+        .eq('id', questionId).eq('session_id', sessionId).maybeSingle()
+      if (questionError) throw questionError
+      if (!question || !['ordering', 'matching'].includes(question.type)) {
+        return jsonResponse({ message: '找不到這一題。' }, 404)
+      }
+      if (question.status !== 'active') return jsonResponse({ message: '本題已停止作答。' }, 409)
+      // The insert policy enforces the deadline for answers the browser writes
+      // directly, but this path runs as service_role and skips it, so the same
+      // rule — the limit plus three seconds for a slow phone — is applied here.
+      if (question.answer_seconds && question.started_at) {
+        const closesAt = new Date(question.started_at).getTime() + (question.answer_seconds + 3) * 1000
+        if (Date.now() > closesAt) return jsonResponse({ message: '作答時間已經結束。' }, 409)
+      }
+      const { data: activeSession } = await supabase.from('sessions').select('status').eq('id', sessionId).maybeSingle()
+      if (activeSession?.status !== 'active') return jsonResponse({ message: '課程已經結束。' }, 409)
+      if (values.length !== (question.options as string[]).length) {
+        return jsonResponse({ message: '作答數量與題目不符。' }, 400)
+      }
+
+      const { data: key } = await supabase.from('question_keys')
+        .select('correct_values').eq('question_id', questionId).maybeSingle()
+      // No key means the presenter asked for an opinion, not an answer, so the
+      // row is filed unmarked and the panel reports the spread instead.
+      const correct = key?.correct_values as string[] | undefined
+      const isCorrect = correct?.length
+        ? correct.length === values.length && correct.every((value, index) => value === values[index])
+        : null
+
+      const { data: saved, error: insertError } = await supabase.from('answers').insert({
+        session_id: sessionId,
+        question_id: questionId,
+        participant_id: participantId,
+        participant_name: participant.name,
+        answer_values: values,
+        is_correct: isCorrect,
+        round: question.answer_round,
+      }).select('*').maybeSingle()
+      if (insertError) {
+        if (insertError.code === '23505') return jsonResponse({ message: '這一輪你已經作答過了。' }, 409)
+        throw insertError
+      }
+      // The key itself is never returned — only whether they matched it.
+      return jsonResponse({ answer: saved, isCorrect })
+    }
+
+    // --- 討論板 ---
+    //
+    // Posting a card is an ordinary insert from the page, the way a danmaku
+    // message is, so it lands on the wall at once and the row-level policy does
+    // the checking. The three actions here are the ones a policy cannot do,
+    // because each of them turns on knowing WHICH student is asking — and all
+    // a policy can see is that the row names somebody in this session.
+    if (['prepare_board_upload', 'get_my_board_posts', 'withdraw_board_post', 'edit_board_post', 'toggle_board_reaction'].includes(action)) {
+      const participant = await verifyParticipant(supabase, sessionId, participantId, participantToken)
+      if (!participant) return jsonResponse({ message: '學員權限驗證失敗，請重新掃描 QR Code 加入。' }, 403)
+
+      // Before the board is revealed the class cannot read the table at all, so
+      // a student's own cards have to come back through here. After it is
+      // revealed the page reads the wall directly and this still answers,
+      // which is what lets the composer show "you have used 2 of 3" either way.
+      if (action === 'get_my_board_posts') {
+        const questionId = typeof input.questionId === 'string' ? input.questionId : ''
+        if (!validUuid(questionId)) return jsonResponse({ message: '題目資料不正確。' }, 400)
+        const { data, error } = await supabase.from('board_posts')
+          .select('*')
+          .eq('question_id', questionId)
+          .eq('session_id', sessionId)
+          .eq('participant_id', participantId)
+          .order('created_at')
+        if (error) throw error
+        return jsonResponse({ posts: attachBoardUrls(supabase, data || []) })
+      }
+
+      if (action === 'prepare_board_upload') {
+        const questionId = typeof input.questionId === 'string' ? input.questionId : ''
+        if (!validUuid(questionId)) return jsonResponse({ message: '題目資料不正確。' }, 400)
+        const { data: question, error: questionError } = await supabase.from('questions')
+          .select('id, status, type, board_formats').eq('id', questionId).eq('session_id', sessionId).maybeSingle()
+        if (questionError) throw questionError
+        if (!question || question.type !== 'board') return jsonResponse({ message: '找不到這個討論板。' }, 404)
+        if (question.status !== 'active') return jsonResponse({ message: '討論板已經結束。' }, 409)
+
+        const kind = typeof input.kind === 'string' ? input.kind : ''
+        if (!['image', 'file', 'audio', 'drawing'].includes(kind)) return jsonResponse({ message: '這個格式不需要上傳。' }, 400)
+        if (!(question.board_formats as string[] || []).includes(kind)) {
+          return jsonResponse({ message: '這個討論板沒有開放這種回覆方式。' }, 409)
+        }
+        const fileName = typeof input.fileName === 'string' ? input.fileName.trim().slice(0, 200) : ''
+        const fileSize = Number(input.fileSize)
+        if (!fileName || !Number.isInteger(fileSize) || fileSize < 1 || fileSize > MAX_UPLOAD_BYTES) {
+          return jsonResponse({ message: '檔案資料不正確，單檔上限 200 MB。' }, 400)
+        }
+        const fileId = crypto.randomUUID()
+        const storagePath = `${boardStoragePrefix(sessionId, questionId, participantId)}${fileId}/${storageSafeName(fileName)}`
+        const { data, error } = await supabase.storage.from(BOARD_BUCKET).createSignedUploadUrl(storagePath)
+        if (error) throw error
+        const { data: publicData } = supabase.storage.from(BOARD_BUCKET).getPublicUrl(storagePath)
+        return jsonResponse({ storagePath, uploadToken: data.token, publicUrl: publicData.publicUrl })
+      }
+
+      if (action === 'withdraw_board_post') {
+        const postId = typeof input.postId === 'string' ? input.postId : ''
+        if (!validUuid(postId)) return jsonResponse({ message: '貼文資料不正確。' }, 400)
+        // Marked rather than removed: the report still shows it was written,
+        // and the per-student limit cannot be reset by deleting and reposting.
+        const { data, error } = await supabase.from('board_posts')
+          .update({ deleted_at: new Date().toISOString() })
+          .eq('id', postId)
+          .eq('session_id', sessionId)
+          .eq('participant_id', participantId)
+          .is('deleted_at', null)
+          .select('id').maybeSingle()
+        if (error) throw error
+        if (!data) return jsonResponse({ message: '找不到這則貼文，或它已經收回了。' }, 404)
+        return jsonResponse({ ok: true })
+      }
+
+      // Fixing a typo without losing the card. Withdrawing and reposting was
+      // the only way before, and it costs the student one of their allotted
+      // cards — the count deliberately does not come back — so a spelling
+      // mistake was effectively permanent.
+      if (action === 'edit_board_post') {
+        const postId = typeof input.postId === 'string' ? input.postId : ''
+        if (!validUuid(postId)) return jsonResponse({ message: '貼文資料不正確。' }, 400)
+
+        const { data: existing, error: readError } = await supabase.from('board_posts')
+          .select('id, kind')
+          .eq('id', postId)
+          .eq('session_id', sessionId)
+          .eq('participant_id', participantId)
+          .is('deleted_at', null)
+          .maybeSingle()
+        if (readError) throw readError
+        if (!existing) return jsonResponse({ message: '找不到這則貼文，或它已經收回了。' }, 404)
+
+        const text = typeof input.body === 'string' ? input.body.trim().slice(0, 1000) : ''
+        if (!text) return jsonResponse({ message: '內容不能是空的。' }, 400)
+
+        // A link card carries its address in url and nothing in body, so that
+        // is the field the student is actually looking at. Same scheme repair
+        // the compose box does, for the same reason.
+        const patch = existing.kind === 'link'
+          ? { url: /^https?:\/\//i.test(text) ? text : `https://${text}` }
+          : { body: text }
+
+        const { data, error } = await supabase.from('board_posts')
+          .update({ ...patch, edited_at: new Date().toISOString() })
+          .eq('id', postId)
+          .eq('session_id', sessionId)
+          .eq('participant_id', participantId)
+          .is('deleted_at', null)
+          .select('id').maybeSingle()
+        if (error) throw error
+        if (!data) return jsonResponse({ message: '找不到這則貼文，或它已經收回了。' }, 404)
+        return jsonResponse({ ok: true })
+      }
+
+      // A second tap takes the reaction back, which is why this is a toggle
+      // rather than an insert: the page does not have to know what it already
+      // sent, and two taps in quick succession cannot leave a duplicate.
+      const postId = typeof input.postId === 'string' ? input.postId : ''
+      if (!validUuid(postId)) return jsonResponse({ message: '貼文資料不正確。' }, 400)
+      const emoji = typeof input.emoji === 'string' ? input.emoji.trim().slice(0, 8) : ''
+      if (!emoji) return jsonResponse({ message: '沒有指定反應。' }, 400)
+      const { data: post, error: postError } = await supabase.from('board_posts')
+        .select('id, question_id, participant_id').eq('id', postId).eq('session_id', sessionId).maybeSingle()
+      if (postError) throw postError
+      if (!post) return jsonResponse({ message: '找不到這則貼文。' }, 404)
+      // Not your own. Hiding the button on the page is a courtesy; this is the
+      // rule. The counts are what the class reads the wall by, so a vote for
+      // yourself is worth refusing rather than merely discouraging.
+      if (post.participant_id === participantId) {
+        return jsonResponse({ message: '不能對自己的貼文按讚。' }, 409)
+      }
+      const { data: board } = await supabase.from('questions')
+        .select('board_revealed_at').eq('id', post.question_id).maybeSingle()
+      if (!board?.board_revealed_at) return jsonResponse({ message: '討論板還沒有開放瀏覽。' }, 409)
+
+      const { data: existing } = await supabase.from('board_reactions')
+        .select('post_id').eq('post_id', postId).eq('participant_id', participantId).eq('emoji', emoji).maybeSingle()
+      if (existing) {
+        const { error } = await supabase.from('board_reactions')
+          .delete().eq('post_id', postId).eq('participant_id', participantId).eq('emoji', emoji)
+        if (error) throw error
+        return jsonResponse({ reacted: false })
+      }
+      const { error: insertError } = await supabase.from('board_reactions')
+        .insert({ post_id: postId, participant_id: participantId, session_id: sessionId, emoji })
+      if (insertError) throw insertError
+      return jsonResponse({ reacted: true })
+    }
+
+    // The answer to a 排序題 or 配對題, once it can no longer be used to
+    // answer with. The key is denied to the class outright, so that nobody can
+    // read it out of devtools before answering — which also meant that
+    // afterwards a student had no way of finding out what the right order was.
+    // Being told your sequence was wrong, and not what right looked like, is
+    // the least useful thing a question can do.
+    if (action === 'get_question_key') {
+      const participant = await verifyParticipant(supabase, sessionId, participantId, participantToken)
+      if (!participant) return jsonResponse({ message: '學員權限驗證失敗，請重新掃描 QR Code 加入。' }, 403)
+      const questionId = typeof input.questionId === 'string' ? input.questionId : ''
+      if (!validUuid(questionId)) return jsonResponse({ message: '題目資料不正確。' }, 400)
+      const { data: question, error: questionError } = await supabase.from('questions')
+        .select('id, type, status').eq('id', questionId).eq('session_id', sessionId).maybeSingle()
+      if (questionError) throw questionError
+      if (!question) return jsonResponse({ message: '找不到這一題。' }, 404)
+      // While it is still open the key is still the answer.
+      if (question.status === 'active') return jsonResponse({ correctValues: [] })
+      const { data, error } = await supabase.from('question_keys')
+        .select('correct_values').eq('question_id', questionId).eq('session_id', sessionId).maybeSingle()
+      if (error) throw error
+      return jsonResponse({ correctValues: data?.correct_values || [] })
+    }
+
     if (action === 'get_file_result') {
       const participant = await verifyParticipant(supabase, sessionId, participantId, participantToken)
       if (!participant) return jsonResponse({ message: '學員權限驗證失敗，請重新掃描 QR Code 加入。' }, 403)
       const questionId = typeof input.questionId === 'string' ? input.questionId : ''
       if (!validUuid(questionId)) return jsonResponse({ message: '題目資料不正確。' }, 400)
       const { data, error } = await supabase.from('file_responses')
-        .select('id, name, analysis_status, analysis_json, submitted_at, analyzed_at')
+        .select('id, name, mime_type, storage_path, analysis_status, analysis_json, submitted_at, analyzed_at')
         .eq('question_id', questionId)
         .eq('session_id', sessionId)
         .eq('participant_id', participantId)
@@ -353,6 +611,8 @@ Deno.serve(async (req) => {
       const responses = (data || []).map((row) => ({
         id: row.id,
         name: row.name,
+        mime_type: row.mime_type,
+        storage_path: row.storage_path,
         analysis_status: row.analysis_status,
         analysis_json: row.analysis_status === 'success' ? row.analysis_json : null,
         submitted_at: row.submitted_at,
@@ -369,7 +629,9 @@ Deno.serve(async (req) => {
       const { data: question, error: questionError } = await supabase.from('questions')
         .select('id, status, type').eq('id', questionId).eq('session_id', sessionId).maybeSingle()
       if (questionError) throw questionError
-      if (!question || question.type !== 'file_upload') return jsonResponse({ message: '找不到檔案上傳題。' }, 404)
+      if (!question || !['file_upload', 'drawing'].includes(question.type)) {
+        return jsonResponse({ message: '找不到檔案上傳題。' }, 404)
+      }
       if (question.status !== 'active') return jsonResponse({ message: '教師已停止收件。' }, 409)
 
       const fileName = typeof input.fileName === 'string' ? input.fileName.trim().slice(0, 200) : ''
@@ -395,6 +657,23 @@ Deno.serve(async (req) => {
         ? input.mimeType.trim().slice(0, 150)
         : 'application/octet-stream'
 
+      // A 電寫題 is one page, and sending a second one means the student
+      // redrew it. Kept side by side they would be marked as two pages of one
+      // answer — the marker reads a multi-file submission as chapters of the
+      // same argument — so the first attempt would be graded alongside the
+      // correction that was meant to replace it. An upload is the opposite: a
+      // second photograph is page two, and both belong.
+      if (question.type === 'drawing') {
+        const { data: earlier } = await supabase.from('file_responses')
+          .select('id, storage_path')
+          .eq('question_id', questionId)
+          .eq('participant_id', participantId)
+        if (earlier?.length) {
+          await supabase.storage.from('interact-files').remove(earlier.map((row) => row.storage_path))
+          await supabase.from('file_responses').delete().in('id', earlier.map((row) => row.id))
+        }
+      }
+
       const { data: saved, error: insertError } = await supabase.from('file_responses').insert({
         session_id: sessionId,
         question_id: questionId,
@@ -418,7 +697,7 @@ Deno.serve(async (req) => {
           question_id: questionId,
           participant_id: participantId,
           participant_name: participant.name,
-          answer_text: '[已上傳檔案]',
+          answer_text: question.type === 'drawing' ? '[已交電寫作答]' : '[已上傳檔案]',
         })
       }
       return jsonResponse({ response: saved })

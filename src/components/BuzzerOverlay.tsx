@@ -1,4 +1,4 @@
-import { PartyPopper, Zap } from 'lucide-react'
+import { PartyPopper, X, Zap } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { isBuzzerAccepting } from '../lib/buzzer'
@@ -10,16 +10,22 @@ type Props = {
   busy?: boolean
   onStart?: () => Promise<void> | void
   onBuzz?: () => Promise<void> | void
+  // Only the presenter gets this. A round that nobody buzzes on sits on top of
+  // the lesson with nothing to press, because starting is the only way out and
+  // it has already been started.
+  onClose?: () => Promise<void> | void
 }
 
 const RESULT_DURATION_MS = 6000
 
-export function BuzzerOverlay({ event, participantId, busy = false, onStart, onBuzz }: Props) {
+export function BuzzerOverlay({ event, participantId, busy = false, onStart, onBuzz, onClose }: Props) {
   const [visible, setVisible] = useState(false)
   const [pressed, setPressed] = useState(false)
+  const [closing, setClosing] = useState(false)
 
   useEffect(() => {
     setPressed(false)
+    setClosing(false)
     if (!event || event.payload.cancelled) {
       setVisible(false)
       return
@@ -75,8 +81,35 @@ export function BuzzerOverlay({ event, participantId, busy = false, onStart, onB
     }
   }
 
+  async function close() {
+    if (!onClose || closing) return
+    // The desktop overlay covers the whole teaching screen. Remove it before
+    // waiting for the Edge Function and Realtime round trip, otherwise the
+    // close target appears to do nothing on a slower classroom connection.
+    setClosing(true)
+    setVisible(false)
+    try {
+      await onClose()
+    } catch {
+      setClosing(false)
+      setVisible(true)
+    }
+  }
+
   return (
     <div className={`buzzer-overlay${finalized ? ' revealed' : ' active'}`} aria-live="assertive">
+      {onClose && (
+        <button
+          aria-label="關閉搶答"
+          className="buzzer-close"
+          title="關閉搶答"
+          type="button"
+          disabled={closing}
+          onClick={() => void close()}
+        >
+          <X size={22} />
+        </button>
+      )}
       <div className="buzzer-rings" />
       <div className="buzzer-content">
         {finalized ? (

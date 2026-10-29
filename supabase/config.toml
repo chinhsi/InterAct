@@ -1,5 +1,8 @@
 project_id = "interact"
 
+[api]
+schemas = ["public", "graphql_public", "interact"]
+
 [functions.create-session]
 verify_jwt = false
 

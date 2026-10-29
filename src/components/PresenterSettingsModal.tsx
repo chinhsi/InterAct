@@ -1,5 +1,5 @@
-import { Languages, Mic, RefreshCw, Settings, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { Camera, Languages, Mic, RefreshCw, Settings, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { CAPTION_DISPLAY_LANGUAGES, INTERPRETATION_LANGUAGES, SPEAKER_LANGUAGES, defaultInterpretationLanguages } from '../lib/captionLanguages'
 import type { Session } from '../types'
@@ -18,12 +18,14 @@ type Props = {
   busy: boolean
   error: string
   microphones: MediaDeviceInfo[]
+  cameras: MediaDeviceInfo[]
   open: boolean
   selectedMicrophoneId: string
+  selectedCameraId: string
   session: Session
   onClose: () => void
-  onRefreshMicrophones: () => void
-  onSave: (settings: PresenterCaptionSettings, microphoneId: string) => void
+  onRefreshDevices: () => void
+  onSave: (settings: PresenterCaptionSettings, microphoneId: string, cameraId: string) => void
 }
 
 const captionFontSizes = [28, 30, 32, 36, 42]
@@ -32,11 +34,13 @@ export function PresenterSettingsModal({
   busy,
   error,
   microphones,
+  cameras,
   open,
   selectedMicrophoneId,
+  selectedCameraId,
   session,
   onClose,
-  onRefreshMicrophones,
+  onRefreshDevices,
   onSave,
 }: Props) {
   const [sourceLanguage, setSourceLanguage] = useState(session.caption_source_language)
@@ -47,11 +51,26 @@ export function PresenterSettingsModal({
   const [interpretationAudioEnabled, setInterpretationAudioEnabled] = useState(session.interpretation_audio_enabled)
   const [interpretationLanguages, setInterpretationLanguages] = useState(session.interpretation_languages)
   const [microphoneId, setMicrophoneId] = useState(selectedMicrophoneId)
+  const [cameraId, setCameraId] = useState(selectedCameraId)
   const [microphoneLevel, setMicrophoneLevel] = useState(0)
   const [previewError, setPreviewError] = useState('')
+  const [cameraPreviewError, setCameraPreviewError] = useState('')
+  const cameraPreviewRef = useRef<HTMLVideoElement>(null)
 
+  // Seeded once per opening, not on every `session`. That object is replaced by
+  // every realtime event in the class — a student joining, an answer arriving,
+  // and above all the caption pipeline restarting when 送出即時口譯語音 is
+  // ticked. Re-seeding on each of those threw away whatever the presenter was
+  // half way through choosing, which is why the language selects jumped back
+  // and the checkbox would not stay ticked.
+  const seededRef = useRef(false)
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      seededRef.current = false
+      return
+    }
+    if (seededRef.current) return
+    seededRef.current = true
     setSourceLanguage(session.caption_source_language)
     setDisplayLanguage(session.caption_display_language)
     setFontSize(session.caption_font_size ?? 32)
@@ -60,7 +79,8 @@ export function PresenterSettingsModal({
     setInterpretationAudioEnabled(session.interpretation_audio_enabled)
     setInterpretationLanguages(session.interpretation_languages)
     setMicrophoneId(selectedMicrophoneId)
-  }, [open, selectedMicrophoneId, session])
+    setCameraId(selectedCameraId)
+  }, [open, selectedCameraId, selectedMicrophoneId, session])
 
   useEffect(() => {
     if (!open) return
@@ -113,6 +133,27 @@ export function PresenterSettingsModal({
     }
   }, [microphoneId, open])
 
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    let stream: MediaStream | null = null
+    void navigator.mediaDevices.getUserMedia({ video: { ...(cameraId ? { deviceId: { exact: cameraId } } : {}), width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false })
+      .then((nextStream) => {
+        if (cancelled) return nextStream.getTracks().forEach((track) => track.stop())
+        stream = nextStream
+        setCameraPreviewError('')
+        if (cameraPreviewRef.current) {
+          cameraPreviewRef.current.srcObject = nextStream
+          void cameraPreviewRef.current.play()
+        }
+      })
+      .catch((reason: unknown) => setCameraPreviewError(reason instanceof Error ? reason.message : '無法讀取相機。'))
+    return () => {
+      cancelled = true
+      stream?.getTracks().forEach((track) => track.stop())
+    }
+  }, [cameraId, open])
+
   const availableInterpretationLanguages = useMemo(
     () => INTERPRETATION_LANGUAGES.filter((language) => language.code !== sourceLanguage),
     [sourceLanguage],
@@ -122,7 +163,7 @@ export function PresenterSettingsModal({
 
   function submit(event: FormEvent) {
     event.preventDefault()
-    onSave({ sourceLanguage, displayLanguage, fontSize, fontBold, position, interpretationAudioEnabled, interpretationLanguages }, microphoneId)
+    onSave({ sourceLanguage, displayLanguage, fontSize, fontBold, position, interpretationAudioEnabled, interpretationLanguages }, microphoneId, cameraId)
   }
 
   return (
@@ -141,7 +182,7 @@ export function PresenterSettingsModal({
         <section className="presenter-settings-section">
           <div className="presenter-settings-section-heading">
             <span><Mic size={17} />麥克風</span>
-            <button className="ghost-button settings-refresh-button" type="button" onClick={onRefreshMicrophones} disabled={busy}>
+            <button className="ghost-button settings-refresh-button" type="button" onClick={onRefreshDevices} disabled={busy}>
               <RefreshCw size={15} />重新掃描
             </button>
           </div>
@@ -163,6 +204,20 @@ export function PresenterSettingsModal({
             </div>
           </div>
           {previewError && <p className="error compact-error">麥克風測試失敗：{previewError}</p>}
+        </section>
+
+        <section className="presenter-settings-section">
+          <div className="presenter-settings-section-heading"><span><Camera size={17} />全班作答相機</span></div>
+          <label>
+            相機來源
+            <select value={cameraId} onChange={(event) => setCameraId(event.target.value)}>
+              <option value="">系統預設相機</option>
+              {cameras.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `相機 ${index + 1}`}</option>)}
+            </select>
+          </label>
+          <video className="settings-camera-preview" muted playsInline ref={cameraPreviewRef} />
+          {cameraPreviewError && <p className="error compact-error">相機測試失敗：{cameraPreviewError}</p>}
+          <p className="muted">僅在你按下相機作答的拍照鍵時取一幀畫面。照片不保存，學生只會看到你確認後的統計。</p>
         </section>
 
         <section className="presenter-settings-section">

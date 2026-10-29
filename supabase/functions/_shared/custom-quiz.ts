@@ -1,4 +1,4 @@
-import { callAiJson, geminiModels, geminiThinkingConfig, errorDetail } from './ai.ts'
+import { callAiJson, geminiThinkingConfig, errorDetail, requestGemini } from './ai.ts'
 import { getAdminClient } from './supabase.ts'
 
 type RequestedType = 'random' | 'multiple_choice' | 'fill_blank' | 'short_answer'
@@ -80,6 +80,21 @@ function extractGeminiText(response: Record<string, unknown>) {
   return candidate?.content?.parts?.map((part) => part.text || '').join('') || ''
 }
 
+// The model almost always writes the correct choice first, so a class that
+// learns to tap the top option scores full marks without reading anything.
+// Shuffling the options fixes that; accepted_answers holds the option text
+// rather than its position, so the key survives the move. The English options
+// have to travel the same permutation, since a student reading the translation
+// is answering by index into the same list.
+function shuffledOrder(length: number) {
+  const order = Array.from({ length }, (_, index) => index)
+  for (let index = order.length - 1; index > 0; index -= 1) {
+    const target = Math.floor(Math.random() * (index + 1))
+    ;[order[index], order[target]] = [order[target], order[index]]
+  }
+  return order
+}
+
 function cleanStrings(value: unknown, limit = 10) {
   if (!Array.isArray(value)) return []
   return [...new Set(value.map((item) => typeof item === 'string' ? item.trim() : '').filter(Boolean))].slice(0, limit)
@@ -89,52 +104,6 @@ function normalizedAnswer(value: string) {
   return value.normalize('NFKC').trim().toLocaleLowerCase().replace(/[\s.,，。！？!?、;；:'"「」『』（）()]/g, '')
 }
 
-function wait(milliseconds: number) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds))
-}
-
-function retryDelay(attempt: number) {
-  return 900 * (2 ** attempt) + Math.floor(Math.random() * 400)
-}
-
-function retryableStatus(status: number) {
-  return status === 408 || status === 429 || status >= 500
-}
-
-async function requestQuizGeneration(
-  apiKey: string,
-  model: string,
-  body: string,
-  attempts: number,
-  timeoutMilliseconds: number,
-) {
-  let failureMessage = 'network request failed'
-  let failureStatus: number | null = null
-
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-        method: 'POST',
-        headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
-        body,
-        signal: AbortSignal.timeout(timeoutMilliseconds),
-      })
-      if (response.ok) return { response, failureMessage: '', failureStatus: null }
-
-      failureStatus = response.status
-      failureMessage = (await response.text()).slice(0, 1000) || `request failed with status ${response.status}`
-      if (!retryableStatus(response.status)) break
-    } catch (error) {
-      failureStatus = null
-      failureMessage = error instanceof Error ? error.message : 'network request failed'
-    }
-
-    if (attempt < attempts - 1) await wait(retryDelay(attempt))
-  }
-
-  return { response: null, failureMessage, failureStatus }
-}
-
 export async function generateCustomQuiz(input: {
   // A screenshot or a file the teacher shared; both reach Gemini the same way.
   sourceUrl: string
@@ -142,9 +111,7 @@ export async function generateCustomQuiz(input: {
   requestedCount: number | null
   requestedType: RequestedType
 }) {
-  const apiKey = Deno.env.get('GEMINI_API_KEY')
-  const [model, fallbackModel] = geminiModels('realtime')
-  if (!apiKey) throw new Error('GEMINI_API_KEY is not configured.')
+  if (!Deno.env.get('GEMINI_API_KEY')) throw new Error('GEMINI_API_KEY is not configured.')
 
   const imageResponse = await fetch(input.sourceUrl)
   if (!imageResponse.ok) throw new Error(`Could not download the quiz source (${imageResponse.status}).`)
@@ -193,17 +160,7 @@ export async function generateCustomQuiz(input: {
   }
 
   const body = requestBodyForModel()
-  let result = await requestQuizGeneration(apiKey, model, body, 1, 12_000)
-  if (!result.response && fallbackModel && fallbackModel !== model && (result.failureStatus === null || retryableStatus(result.failureStatus))) {
-    console.warn(`Gemini quiz generation unavailable on ${model}; retrying with ${fallbackModel}.`)
-    result = await requestQuizGeneration(apiKey, fallbackModel, body, 1, 18_000)
-  }
-  if (!result.response) {
-    const status = result.failureStatus ? ` (${result.failureStatus})` : ''
-    throw new Error(`Gemini quiz generation failed${status}: ${result.failureMessage}`)
-  }
-
-  const response = result.response
+  const response = await requestGemini(body, 'realtime')
   const outputText = extractGeminiText(await response.json())
   if (!outputText) throw new Error('Gemini returned no quiz.')
   const output = JSON.parse(outputText) as { title?: unknown; items?: unknown }
@@ -232,17 +189,21 @@ export async function generateCustomQuiz(input: {
     const translation = (item.translation_en || {}) as Record<string, unknown>
     const translatedPrompt = typeof translation.prompt_text === 'string' ? translation.prompt_text.trim().slice(0, 2000) : ''
     const translatedOptions = cleanStrings(translation.options, 6)
+    const aligned = translatedOptions.length === options.length
+    const order = type === 'multiple_choice' ? shuffledOrder(options.length) : []
+    const shownOptions = order.map((at) => options[at])
+    const shownTranslated = aligned ? order.map((at) => translatedOptions[at]) : translatedOptions
     return {
       id: crypto.randomUUID(),
       position: index + 1,
       type,
       prompt_text: promptText,
-      options: type === 'multiple_choice' ? options : [],
+      options: type === 'multiple_choice' ? shownOptions : [],
       points: basePoints + (index < remainder ? 1 : 0),
       translations: {
         en: {
           prompt_text: translatedPrompt || promptText,
-          options: type === 'multiple_choice' && translatedOptions.length === options.length ? translatedOptions : options,
+          options: type === 'multiple_choice' && aligned ? shownTranslated : shownOptions,
         },
       },
       accepted_answers: acceptedAnswers,

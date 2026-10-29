@@ -1,6 +1,17 @@
 import ExcelJS from 'exceljs'
-import type { QuestionAnalysis, SessionAnalysis, SessionMetrics, SessionReportData } from '../types'
+import type { Participant, QuestionAnalysis, SessionAnalysis, SessionMetrics, SessionReportData } from '../types'
 import { badgeText, buzzerWinsFrom, participationRows } from './participation'
+import { matchRoster } from './classRoster'
+import { ratingStats } from './rating'
+
+// A sliced 排序題 answers with image URLs. A spreadsheet column of storage paths
+// is unreadable and enormous; the count and the fact it was ordered is the part
+// a teacher can act on.
+function sequenceText(values: string[] | null | undefined) {
+  if (!values?.length) return ''
+  if (values.some((value) => /^https?:/.test(value))) return `${values.length} 個圖塊（依學生排序）`
+  return values.join('、')
+}
 
 const COLORS = {
   primary: '1463FF',
@@ -28,7 +39,9 @@ const fileVerdictLabels: Record<string, string> = {
 
 const questionTypeLabels = {
   send_screen: '派送畫面',
+  board: '討論板',
   poll: '投票題',
+  rating: '評分題',
   multiple_choice: '選擇題',
   true_false: '是非題',
   short_answer: '問答題',
@@ -36,6 +49,11 @@ const questionTypeLabels = {
   oral_response: '口語表達',
   custom_quiz: '自訂測驗',
   file_upload: '上傳作答',
+  drawing: '電寫題',
+  hotspot: '圖上點選',
+  ordering: '排序題',
+  matching: '配對題',
+  camera_poll: '全班相機作答',
 }
 
 const quizItemTypeLabels = {
@@ -211,6 +229,9 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
 
   const participationByParticipant = new Map(
     participationRows({
+      // A report is read after the class, so the absence clock has to stop at
+      // the end of it rather than at the moment the file is opened.
+      endedAt: data.session.ended_at,
       participants: data.participants,
       questions: data.questions,
       answers: data.answers,
@@ -218,13 +239,19 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
       quizAttempts: data.customQuizResults.attempts,
       buzzerWins: buzzerWinsFrom(data.buzzerEvents),
       uploadMarks: data.fileResponses,
+      boardPosts: data.boardPosts,
     }).map((row) => [row.participant.id, row]),
   )
 
   const participants = workbook.addWorksheet('參與者')
   participants.columns = [
     { header: '姓名', key: 'name', width: 20 },
+    { header: '學號', key: 'studentNo', width: 14 },
+    { header: '系所 / 單位', key: 'unit', width: 20 },
+    { header: '出席', key: 'attendance', width: 12 },
+    { header: '總分', key: 'total', width: 10 },
     { header: '參與分數', key: 'score', width: 12 },
+    { header: '老師加分', key: 'bonus', width: 12 },
     { header: '獎章', key: 'badges', width: 26 },
     { header: '加入時間', key: 'joinedAt', width: 22 },
     { header: '最後在線時間', key: 'lastSeenAt', width: 22 },
@@ -234,26 +261,111 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
     { header: '作答次數', key: 'answerCount', width: 14 },
     { header: '上傳作答分數', key: 'uploadScore', width: 14 },
   ]
-  for (const participant of data.participants) {
+
+  const bonusByParticipant = new Map<string, number>()
+  for (const award of data.participantPoints || []) {
+    bonusByParticipant.set(award.participant_id, (bonusByParticipant.get(award.participant_id) || 0) + award.points)
+  }
+
+  function participantRow(participant: Participant, studentNo: string, unit: string, attendance: string) {
     const participation = participationByParticipant.get(participant.id)
-    participants.addRow({
+    const bonus = bonusByParticipant.get(participant.id) || 0
+    return {
       name: participant.name,
+      studentNo,
+      unit,
+      attendance,
+      total: (participation?.score ?? 0) + bonus,
       score: participation?.score ?? 0,
+      bonus,
       badges: participation ? badgeText(participation.badges) : '',
       joinedAt: formatDate(participant.joined_at),
       lastSeenAt: formatDate(participant.last_seen_at),
       presentMinutes: minutes(new Date(participant.last_seen_at).getTime() - new Date(participant.joined_at).getTime()),
-      unfocusedMinutes: minutes(participant.unfocused_ms),
+      // Same figure the roster shows: background time plus time with no page
+      // there to report any. The heading still says 離開畫面 because that is
+      // what it is — the screen not being in front of them, however it got that
+      // way.
+      unfocusedMinutes: participation ? minutes(participation.awayMs) : '',
       messageCount: messageCountByParticipant.get(participant.id) || 0,
       answerCount: answerCountByParticipant.get(participant.id) || 0,
       // Blank rather than 0 when nothing was marked, so an empty cell always
       // means "no upload marked" instead of "marked and scored nothing".
       uploadScore: participation?.uploadScore ?? '',
-    })
+    }
   }
+
+  // Someone the presenter removed mid-class still answered things, so their row
+  // stays — flagged, because two rows for one student would otherwise look like
+  // a duplicate rather than a name that was corrected.
+  const present = data.participants.filter((participant) => !participant.removed_at)
+  const removed = data.participants.filter((participant) => participant.removed_at)
+
+  if (data.roster) {
+    // The class list in the presenter's own order, which is the order they will
+    // read it in. A name nobody joined under still gets a row: that absence is
+    // the thing an attendance sheet exists to record.
+    const { matches, matchedParticipantIds } = matchRoster(data.roster.entries, present)
+    const byId = new Map(present.map((participant) => [participant.id, participant]))
+    for (const { entry, participantId } of matches) {
+      const participant = participantId ? byId.get(participantId) : null
+      if (participant) {
+        participants.addRow(participantRow(participant, entry.studentNo, entry.unit, '出席'))
+      } else {
+        participants.addRow({
+          name: entry.name,
+          studentNo: entry.studentNo,
+          unit: entry.unit,
+          attendance: '未到',
+          total: '',
+          score: '',
+          bonus: '',
+          badges: '',
+          joinedAt: '',
+          lastSeenAt: '',
+          presentMinutes: '',
+          unfocusedMinutes: '',
+          messageCount: '',
+          answerCount: '',
+          uploadScore: '',
+        })
+      }
+    }
+    for (const participant of present) {
+      if (matchedParticipantIds.has(participant.id)) continue
+      participants.addRow(participantRow(participant, '', '', '不在名單'))
+    }
+  } else {
+    for (const participant of present) {
+      participants.addRow(participantRow(participant, '', '', '出席'))
+    }
+  }
+  for (const participant of removed) {
+    participants.addRow(participantRow(participant, '', '', '已移出'))
+  }
+
   participants.getColumn('joinedAt').numFmt = 'yyyy-mm-dd hh:mm:ss'
   participants.getColumn('lastSeenAt').numFmt = 'yyyy-mm-dd hh:mm:ss'
   styleTableSheet(participants)
+
+  if ((data.participantPoints || []).length) {
+    const nameById = new Map(data.participants.map((participant) => [participant.id, participant.name]))
+    const bonusSheet = workbook.addWorksheet('老師加分')
+    bonusSheet.columns = [
+      { header: '姓名', key: 'name', width: 20 },
+      { header: '加分', key: 'points', width: 10 },
+      { header: '時間', key: 'awardedAt', width: 22 },
+    ]
+    for (const award of data.participantPoints) {
+      bonusSheet.addRow({
+        name: nameById.get(award.participant_id) || '',
+        points: award.points,
+        awardedAt: formatDate(award.created_at),
+      })
+    }
+    bonusSheet.getColumn('awardedAt').numFmt = 'yyyy-mm-dd hh:mm:ss'
+    styleTableSheet(bonusSheet)
+  }
 
   const analysisMap = questionAnalysisMap(data)
   const screenshotMap = new Map(data.screenshots.map((screenshot) => [screenshot.id, screenshot.public_url]))
@@ -268,6 +380,10 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
     { header: '選項', key: 'options', width: 25 },
     { header: '正確答案', key: 'correctAnswer', width: 14 },
     { header: '作答數', key: 'answerCount', width: 12 },
+    { header: '原始平均（評分題）', key: 'ratingAverage', width: 20 },
+    { header: 'IQR 剔除後平均（評分題）', key: 'ratingFilteredAverage', width: 26 },
+    { header: '剔除筆數（評分題）', key: 'ratingExcludedCount', width: 20 },
+    { header: '評分輪次', key: 'ratingRound', width: 12 },
     { header: '作答率', key: 'responseRate', width: 12 },
     { header: '正確率', key: 'correctRate', width: 12 },
     { header: 'AI 理解摘要', key: 'analysis', width: 50 },
@@ -276,6 +392,7 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
   ]
   data.questions.forEach((question, index) => {
     const questionAnswers = data.answers.filter((answer) => answer.question_id === question.id)
+    const rating = question.type === 'rating' ? ratingStats(questionAnswers.filter(answer => answer.round === question.answer_round)) : null
     const assessed = questionAnswers.filter((answer) => answer.is_correct !== null)
     const questionAnalysis = analysisMap.get(question.id)
     const quiz = quizByQuestion.get(question.id)
@@ -306,15 +423,25 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
     }
     questions.addRow({
       number: index + 1,
+      ...(rating ? {
+        ratingAverage: rating.average ?? '',
+        ratingFilteredAverage: rating.filteredAverage ?? '',
+        ratingExcludedCount: rating.excludedCount,
+        ratingRound: question.answer_round,
+      } : {}),
       type: questionTypeLabels[question.type],
       title: questionAnalysis?.question_understanding.detected_question || question.prompt_text || question.title,
       status: question.status,
-      options: question.options.join('、'),
+      options: question.type === 'camera_poll' && question.camera_result
+        ? question.options.map((option, optionIndex) => `${option}：${question.camera_result?.counts[optionIndex] || 0} 人`).join('\n')
+        : question.options.join('、'),
       correctAnswer: question.correct_answers?.length ? question.correct_answers.join('、') : question.correct_answer || '',
-      answerCount: questionAnswers.length,
+      answerCount: question.type === 'camera_poll' ? question.camera_result?.totalDetected || 0 : questionAnswers.length,
       responseRate: data.participants.length ? questionAnswers.length / data.participants.length : 0,
       correctRate: assessed.length ? assessed.filter((answer) => answer.is_correct).length / assessed.length : '',
-      analysis: questionAnalysis?.response_analysis.understanding_summary || '',
+      analysis: question.type === 'camera_poll' && question.camera_result
+        ? [question.camera_result.notes, ...(question.camera_result.paperResponses || []).map((text, paperIndex) => `白紙 ${paperIndex + 1}：${text || '文字不清楚／無法讀取'}`)].filter(Boolean).join('\n')
+        : questionAnalysis?.response_analysis.understanding_summary || '',
       misconceptions: questionAnalysis?.response_analysis.misconceptions.join('\n') || '',
       screenshotUrl: question.screenshot_id ? screenshotMap.get(question.screenshot_id) || '' : '',
     })
@@ -345,7 +472,7 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
       questionNumber: questionNumber.get(answer.question_id) || '',
       questionType: question ? questionTypeLabels[question.type] : '',
       participantName: answer.participant_name,
-      answerValue: answer.answer_values?.length ? answer.answer_values.join('、') : answer.answer_value || '',
+      answerValue: sequenceText(answer.answer_values) || answer.answer_value || '',
       answerText: answer.answer_text || '',
       correctness: answer.is_correct === null ? '未判定' : answer.is_correct ? '正確' : '錯誤',
       submittedAt: formatDate(answer.submitted_at),
@@ -361,7 +488,7 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
       questionNumber: `${questionNumber.get(attempt.question_id) || ''}-${item.position}`,
       questionType: `自訂測驗／${quizItemTypeLabels[item.type]}`,
       participantName: attempt.participant_name,
-      answerValue: answer.answer_values?.join('、') || '',
+      answerValue: sequenceText(answer.answer_values),
       answerText: answer.answer_text || '',
       correctness: score === null ? '評分中' : score >= itemPoints ? '正確／滿分' : score > 0 ? '部分得分' : '錯誤／零分',
       score: score === null ? '' : `${score}/${itemPoints}`,
@@ -506,6 +633,55 @@ export async function exportSessionReport(data: SessionReportData, analysis: Ses
   }
   messages.getColumn('createdAt').numFmt = 'yyyy-mm-dd hh:mm:ss'
   styleTableSheet(messages)
+
+  // Every card, in board order then time order, with the two states that
+  // explain a gap: a student took it back, or the presenter took it down.
+  // Replies are rows of their own, pointing at what they answered, so a thread
+  // can be reconstructed from the sheet rather than only seen on screen.
+  const boardQuestionTitles = new Map(
+    data.questions.filter((question) => question.type === 'board').map((question) => [question.id, question]),
+  )
+  if (data.boardPosts.length) {
+    const board = workbook.addWorksheet('討論板')
+    board.columns = [
+      { header: '討論板', key: 'boardTitle', width: 26 },
+      { header: '主題', key: 'topic', width: 30 },
+      { header: '時間', key: 'createdAt', width: 22 },
+      { header: '姓名', key: 'participantName', width: 20 },
+      { header: '顯示模式', key: 'displayMode', width: 12 },
+      { header: '型式', key: 'kind', width: 10 },
+      { header: '內容', key: 'content', width: 60 },
+      { header: '連結／檔案', key: 'link', width: 48 },
+      { header: '長度（秒）', key: 'seconds', width: 12 },
+      { header: '回覆誰', key: 'replyTo', width: 22 },
+      { header: '狀態', key: 'state', width: 14 },
+    ]
+    const kindLabels: Record<string, string> = {
+      text: '文字', link: '連結', image: '圖片', file: '檔案', audio: '錄音', drawing: '電繪',
+    }
+    const authorOf = new Map(data.boardPosts.map((post) => [post.id, post.participant_name]))
+    const ordered = [...data.boardPosts].sort((left, right) => (
+      left.question_id.localeCompare(right.question_id) || left.created_at.localeCompare(right.created_at)
+    ))
+    for (const post of ordered) {
+      const question = boardQuestionTitles.get(post.question_id)
+      board.addRow({
+        boardTitle: question?.title || '討論板',
+        topic: question?.prompt_text || '',
+        createdAt: formatDate(post.created_at),
+        participantName: post.participant_name,
+        displayMode: post.anonymous_at_display ? '匿名' : '具名',
+        kind: kindLabels[post.kind] || post.kind,
+        content: post.body || '',
+        link: post.url || post.public_url || post.storage_path || '',
+        seconds: post.duration_ms ? Math.round(post.duration_ms / 1000) : '',
+        replyTo: post.reply_to ? (authorOf.get(post.reply_to) || '') : '',
+        state: post.deleted_at ? '學生收回' : post.hidden_at ? '教師收起' : post.pinned_at ? '置頂' : '',
+      })
+    }
+    board.getColumn('createdAt').numFmt = 'yyyy-mm-dd hh:mm:ss'
+    styleTableSheet(board)
+  }
 
   const sharedContents = workbook.addWorksheet('文字派送')
   sharedContents.columns = [

@@ -21,7 +21,9 @@ export function QuestionHistory({
   const history = useMemo(
     () => questions
       .map((question, index) => ({ question, number: index + 1 }))
-      .filter(({ question }) => question.id !== activeQuestionId)
+      // Stopping closes the answer window, so the question should be visible
+      // in history even while it remains the session's resumable current item.
+      .filter(({ question }) => question.id !== activeQuestionId || question.status !== 'active')
       .reverse(),
     [activeQuestionId, questions],
   )
@@ -58,7 +60,7 @@ export function QuestionHistory({
             >
               <span>第 {number} 題</span>
               <strong>{question.prompt_text || question.title}</strong>
-              <small>{answerCounts[question.id] || 0} 份作答</small>
+              <small>{question.status === 'stopped' ? '已停止 · ' : ''}{answerCounts[question.id] || 0} 份作答</small>
             </button>
           ))}
         </div>

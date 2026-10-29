@@ -39,3 +39,15 @@ Core features:
 Build in phases. Keep the app simple and working before adding polish.
 
 For a new self-hosted deployment, follow `skills/interact-self-deploy/SKILL.md` and keep each deployer's Supabase, Gemini, Reurl, and GitHub credentials separate.
+
+## User-approved desktop testing workflow
+
+The user has explicitly requested desktop builds, overriding the original
+web-only restriction above. Keep the working development checkout in
+`E:/codex/InterAct`. Maintain the complete, runnable Windows app folder at
+`E:/codex/InterAct/interact` for local testing. Never put local app builds in
+Dropbox; the user explicitly corrected the old workspace path.
+Apply and verify changes there first. Do not create or publish a new release,
+move a release tag, or replace release assets until the user explicitly approves
+the tested changes. Preserve the local app's `.env` and `InterAct.config.json`
+when refreshing its executable/resources. Keep AI API secrets server-side.

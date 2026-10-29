@@ -1,4 +1,4 @@
-import type { Answer, FileResponse, Message, Participant, Question, QuizAttempt } from '../types'
+import type { Answer, BoardPost, FileResponse, Message, Participant, Question, QuizAttempt } from '../types'
 
 // One definition of "how involved was this student", shared by the live roster
 // and the exported report so the two can never disagree.
@@ -25,6 +25,9 @@ export type ParticipationRow = {
   answeredQuestionIds: Set<string>
   answerCount: number
   messageCount: number
+  // Replies this student wrote on a discussion board, worth two points each up
+  // to thirty.
+  replyCount: number
   gradedCount: number
   correctCount: number
   quickCount: number
@@ -33,9 +36,17 @@ export type ParticipationRow = {
   // and how many of those there were. Null before anything has been marked.
   uploadScore: number | null
   uploadCount: number
+  // What the page itself measured: open, but behind something else.
   unfocusedMs: number
   focusStreakMs: number
-  onlineMs: number
+  // Not looking at the class, by either route — see the note where it is
+  // worked out. This is the figure to show and to judge by; unfocusedMs is
+  // only one half of it.
+  awayMs: number
+  // How long the class has been running for this student, from the moment they
+  // joined to the moment the clock stops. The denominator for awayMs, not a
+  // measure of attendance.
+  enrolledMs: number
 }
 
 type Input = {
@@ -51,11 +62,20 @@ type Input = {
   // Marked uploads. Only rows the presenter actually paid to mark carry a
   // score, so an unmarked class simply scores as it did before.
   uploadMarks?: FileResponse[]
+  // Cards on a 討論板. They are answers — a student who put three things on the
+  // wall has taken part in that question — but they live in their own table, so
+  // without them the roster reported everyone as 未作答 no matter how much they
+  // had written.
+  boardPosts?: BoardPost[]
+  // When the class finished. The absence clock stops here, so a report opened
+  // next week does not count the intervening week as time away. Null while the
+  // class is still running, which is what the live roster passes.
+  endedAt?: string | null
 }
 
 // Questions a student could actually have answered. A screen that was only
 // pushed out asks nothing, so counting it would punish everyone equally.
-const answerableTypes = new Set(['poll', 'multiple_choice', 'true_false', 'short_answer', 'pronunciation', 'oral_response', 'custom_quiz', 'file_upload'])
+const answerableTypes = new Set(['poll', 'rating', 'multiple_choice', 'true_false', 'short_answer', 'pronunciation', 'oral_response', 'custom_quiz', 'file_upload', 'drawing', 'board'])
 
 export function answerableQuestions(questions: Question[]) {
   return questions.filter((question) => answerableTypes.has(question.type))
@@ -117,6 +137,24 @@ export function participationRows(input: Input): ParticipationRow[] {
     for (const attempt of input.quizAttempts) {
       if (attempt.participant_id === participant.id) answeredQuestionIds.add(attempt.question_id)
     }
+    // A card on the wall counts as having taken part, and one they deleted does
+    // not — the same rule the posting limit uses, so what the roster says and
+    // what the student's own page says about their allowance always agree.
+    // Replies are excluded for the same reason they do not count against the
+    // limit: answering someone else is not answering the question.
+    for (const post of input.boardPosts || []) {
+      if (post.participant_id !== participant.id) continue
+      if (post.deleted_at || post.reply_to) continue
+      answeredQuestionIds.add(post.question_id)
+    }
+    // Answering the question is one thing; answering a classmate is another,
+    // and it is the half of a discussion that does not happen on its own. Worth
+    // points of its own, therefore, rather than being folded into the card
+    // count above — which deliberately ignores replies, because a reply is not
+    // a contribution to the topic.
+    const replyCount = (input.boardPosts || []).filter((post) => (
+      post.participant_id === participant.id && post.reply_to && !post.deleted_at
+    )).length
     const gradedCount = own.filter((answer) => answer.is_correct !== null).length
     const correctCount = own.filter((answer) => answer.is_correct === true).length
     const messageCount = messageCounts.get(participant.id) || 0
@@ -126,7 +164,32 @@ export function participationRows(input: Input): ParticipationRow[] {
     // The longest unbroken stretch with the page in front of them; leaving
     // starts it over, so this is not the same as "not away for long overall".
     const focusStreakMs = participant.focus_streak_ms || 0
-    const onlineMs = Math.max(0, new Date(participant.last_seen_at).getTime() - new Date(participant.joined_at).getTime())
+
+    // Time this student was not looking at the class. There are two ways not to
+    // be looking and the page can only report one of them: it measures its own
+    // time in the background, but when it is closed the measuring stops with it.
+    //
+    // Counting only what the page reported therefore rewarded leaving. A
+    // student who shut the tab twelve minutes into a ninety minute class
+    // reported no time away at all, kept a twelve minute focus streak, and
+    // collected both the attention bonus and the 專注 badge — while one who sat
+    // through the whole class with the page open behind a chat window was
+    // penalised. The silence since the last heartbeat is the half that only
+    // grows when there is nothing left to do the counting, and adding it puts
+    // those two students back in the right order.
+    //
+    // The two halves cannot double count: every heartbeat folds the background
+    // time so far into unfocused_ms and moves last_seen_at to that same moment,
+    // so they meet exactly at the last beat and never overlap.
+    const clockStops = Math.min(
+      input.endedAt ? new Date(input.endedAt).getTime() : Date.now(),
+      // Someone the presenter removed stops accruing when they were removed.
+      // They are absent from then on because they were told to be.
+      participant.removed_at ? new Date(participant.removed_at).getTime() : Infinity,
+    )
+    const silenceMs = Math.max(0, clockStops - new Date(participant.last_seen_at).getTime())
+    const awayMs = silenceMs + unfocusedMs
+    const enrolledMs = Math.max(0, clockStops - new Date(participant.joined_at).getTime())
     const quiz = quizByParticipant.get(participant.id)
     const upload = uploadByParticipant.get(participant.id)
     const uploadScore = upload ? Math.round(upload.total / upload.count) : null
@@ -137,6 +200,10 @@ export function participationRows(input: Input): ParticipationRow[] {
     score += quickCount * 5
     score += buzzerWins * 5
     score += Math.min(messageCount * 2, 20)
+    // Capped for the same reason danmaku is: without a ceiling the quickest way
+    // to the top of the list is thirty one-word replies, which is the opposite
+    // of what paying for replies is meant to encourage.
+    score += Math.min(replyCount * 2, 30)
     if (quiz && quiz.max > 0) score += Math.round((quiz.score / quiz.max) * 20)
     // A marked upload is worth what a quiz is worth, on the same 20-point
     // scale, so a class assessed on paper is not scored lower than one
@@ -144,9 +211,15 @@ export function participationRows(input: Input): ParticipationRow[] {
     // answer row the marker writes back, the same as any other question.
     if (uploadScore !== null) score += Math.round((uploadScore / 100) * 20)
     // Attention is worth acknowledging in both directions, but only once the
-    // student has been present long enough for the figure to mean anything.
-    if (focusStreakMs >= 10 * 60_000) score += 10
-    else if (onlineMs >= 10 * 60_000 && unfocusedMs >= 10 * 60_000) score -= 10
+    // class has run long enough for the figure to mean anything.
+    //
+    // The absence is tested first. A student who paid attention for ten minutes
+    // and then walked out has both a focus streak and a long absence, and
+    // taking the bonus first credited them for the streak without ever looking
+    // at the absence.
+    const inattentive = enrolledMs >= 10 * 60_000 && awayMs >= 10 * 60_000
+    if (inattentive) score -= 10
+    else if (focusStreakMs >= 10 * 60_000) score += 10
 
     const badges: Badge[] = []
     if (askedCount >= 3 && answeredQuestionIds.size >= askedCount) {
@@ -165,7 +238,10 @@ export function participationRows(input: Input): ParticipationRow[] {
     if (messageCount > 4) {
       badges.push({ key: 'vocal', icon: '💬', label: '熱烈', detail: `${messageCount} 則彈幕` })
     }
-    if (focusStreakMs >= 10 * 60_000) {
+    // Same guard as the score above, and for the same reason: a medal for
+    // concentration should not go to someone who concentrated for ten minutes
+    // and then left for the rest of the class.
+    if (!inattentive && focusStreakMs >= 10 * 60_000) {
       badges.push({ key: 'focused', icon: '👀', label: '專注', detail: `連續專注 ${Math.floor(focusStreakMs / 60_000)} 分鐘` })
     }
     score += badges.length * BADGE_POINTS
@@ -177,6 +253,7 @@ export function participationRows(input: Input): ParticipationRow[] {
       answeredQuestionIds,
       answerCount: answeredQuestionIds.size,
       messageCount,
+      replyCount,
       gradedCount,
       correctCount,
       quickCount,
@@ -185,7 +262,8 @@ export function participationRows(input: Input): ParticipationRow[] {
       uploadCount: upload?.count || 0,
       unfocusedMs,
       focusStreakMs,
-      onlineMs,
+      awayMs,
+      enrolledMs,
     }
   })
 }

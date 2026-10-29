@@ -1,6 +1,20 @@
 const { app, BrowserWindow, desktopCapturer, ipcMain, screen, shell, systemPreferences } = require('electron')
+const { fitAndCentre, overlayBoundsFor } = require('./windowPlacement.cjs')
 const path = require('node:path')
 const fs = require('node:fs')
+const portableConfig = require('./portableConfig.cjs')
+
+// The preview is installed alongside the classroom version. Electron derives
+// its default profile from package.json (still named InterAct), so a distinct
+// bundle ID alone does not prevent it from opening the old backend and owner
+// key. Separate Chromium storage before app.ready, before any window exists.
+const isPreviewBuild = app.isPackaged && path.basename(process.execPath) === 'InterActPreview'
+if (isPreviewBuild) {
+  const previewDataDir = path.join(app.getPath('appData'), 'InterActPreview')
+  fs.mkdirSync(previewDataDir, { recursive: true })
+  app.setPath('userData', previewDataDir)
+  app.setPath('sessionData', previewDataDir)
+}
 
 function logFatalError(scope, error) {
   const message = `[${new Date().toISOString()}] [${scope}] ${error?.stack || error}\n`
@@ -39,12 +53,18 @@ process.on('unhandledRejection', (reason) => logFatalError('unhandledRejection',
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
 const isDesktopDev = process.env.INTERACT_DESKTOP_DEV === '1'
-const APP_USER_MODEL_ID = 'tw.interact.presenter.desktop'
-const APP_WINDOW_ICON_PATH = isDesktopDev
+const APP_USER_MODEL_ID = isPreviewBuild ? 'tw.interact.presenter.preview' : 'tw.interact.presenter.desktop'
+const APP_WINDOW_ICON_PATH = !app.isPackaged
   ? path.join(__dirname, '..', 'build', 'icon.ico')
   : path.join(process.resourcesPath, 'icon.ico')
 const APP_EXECUTABLE_PATH = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath
-const APP_RELAUNCH_ICON_PATH = isDesktopDev ? APP_WINDOW_ICON_PATH : APP_EXECUTABLE_PATH
+const PORTABLE_CONFIG_DIRECTORY = portableConfig.configDirectory({
+  packaged: app.isPackaged, platform: process.platform,
+  executablePath: APP_EXECUTABLE_PATH, appPath: app.getAppPath(),
+})
+// The taskbar's relaunch icon is a separate Shell property from BrowserWindow's
+// icon. Use the shipped ICO, not an EXE path cached from an older portable build.
+const APP_RELAUNCH_ICON_PATH = APP_WINDOW_ICON_PATH
 const CONTROL_COLLAPSED = { width: 194, height: 242 }
 const CONTROL_EXPANDED = { width: 420, height: 760 }
 const CONTROL_WITH_SETTINGS = { width: 1100, height: 760 }
@@ -55,6 +75,39 @@ const OVERLAY_RELATIVE_LEVEL = 2
 const WORD_CLOUD_RELATIVE_LEVEL = 4
 const QUIZ_REVIEW_RELATIVE_LEVEL = 5
 const ROSTER_RELATIVE_LEVEL = 5
+
+// setAppDetails is Windows-only. On macOS the method does not exist at all, so
+// calling it takes down window creation before anything is shown. What it sets —
+// the taskbar identity, so a pinned InterAct relaunches the real executable
+// instead of the temp copy a portable build runs from — has no counterpart on a
+// platform where the app is a bundle in /Applications.
+function applyTaskbarIdentity(win) {
+  if (process.platform !== 'win32') return
+  win.setIcon(APP_WINDOW_ICON_PATH)
+  win.setAppDetails({
+    appId: APP_USER_MODEL_ID,
+    appIconPath: APP_RELAUNCH_ICON_PATH,
+    appIconIndex: 0,
+    relaunchCommand: `"${APP_EXECUTABLE_PATH}"`,
+    relaunchDisplayName: 'InterAct',
+  })
+}
+
+function openScreenCaptureSettings() {
+  shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+}
+
+// `not-determined` must be allowed through once: desktopCapturer.getSources()
+// is what makes macOS show its first consent prompt and add InterAct to the
+// Screen Recording list. Blocking it here meant a first-time Mac could never
+// grant access because the app was not yet present in System Settings.
+function assertScreenCaptureIsNotBlocked() {
+  if (process.platform !== 'darwin') return
+  const status = systemPreferences.getMediaAccessStatus('screen')
+  if (status !== 'denied' && status !== 'restricted') return
+  openScreenCaptureSettings()
+  throw new Error('macOS 已阻擋 InterAct 擷取螢幕。請在「系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製」允許 InterAct，然後重新啟動程式。')
+}
 
 app.setAppUserModelId(APP_USER_MODEL_ID)
 
@@ -125,6 +178,12 @@ function createWindow() {
     icon: APP_WINDOW_ICON_PATH,
     backgroundColor: '#00000000',
     webPreferences: {
+      // The controls spend most of a class collapsed to a corner or hidden
+      // behind the overlay, and Chromium throttles a hidden window's timers
+      // down to about one a minute. That is below the rate the realtime
+      // connection has to be serviced at, so the socket would be dropped and
+      // the class told their teacher had left while the teacher was mid-lesson.
+      backgroundThrottling: false,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -134,13 +193,7 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => mainWindow?.show())
 
-  if (process.platform === 'win32') mainWindow.setAppDetails({
-    appId: APP_USER_MODEL_ID,
-    appIconPath: APP_RELAUNCH_ICON_PATH,
-    appIconIndex: 0,
-    relaunchCommand: `"${APP_EXECUTABLE_PATH}"`,
-    relaunchDisplayName: 'InterAct',
-  })
+  applyTaskbarIdentity(mainWindow)
   configureWebContents(mainWindow)
 
   loadAppRoute(mainWindow, '/presenter/new')
@@ -159,6 +212,7 @@ function createWindow() {
 
   mainWindow.on('move', () => {
     if (lastControlBounds) lastControlBounds = mainWindow.getBounds()
+    scheduleFollowControlDisplay()
   })
 
   mainWindow.on('will-resize', (event) => {
@@ -181,8 +235,6 @@ function setPresenterTopmost(enabled) {
   presenterTopmostEnabled = Boolean(enabled)
   if (!mainWindow || mainWindow.isDestroyed()) return
   mainWindow.setAlwaysOnTop(enabled, TOPMOST_LEVEL, enabled ? CONTROL_RELATIVE_LEVEL : 0)
-  // macOS: Keynote/PowerPoint full-screen slideshows live in their own Space.
-  // Follow them so the control panel stays reachable during presenter mode.
   if (process.platform === 'darwin') mainWindow.setVisibleOnAllWorkspaces(Boolean(enabled), { visibleOnFullScreen: true })
 }
 
@@ -194,6 +246,7 @@ function reinforcePresenterTopmost() {
     || mainWindow.isMinimized()
     || !mainWindow.isVisible()
     || reportWindow
+    || (quizReviewWindow && !quizReviewWindow.isDestroyed())
   ) return
   mainWindow.setAlwaysOnTop(true, TOPMOST_LEVEL, CONTROL_RELATIVE_LEVEL)
   mainWindow.moveTop()
@@ -201,6 +254,9 @@ function reinforcePresenterTopmost() {
 
 function bringControlToFront(focus = false) {
   if (!mainWindow || mainWindow.isDestroyed() || reportWindow) return
+  // Delayed expand/restore callbacks can run after the detail window hid us.
+  // Keep the presenter hidden until that window's closed handler restores it.
+  if (quizReviewWindow && !quizReviewWindow.isDestroyed()) return
 
   if (mainWindow.isMinimized()) mainWindow.restore()
   if (focus) mainWindow.show()
@@ -244,6 +300,34 @@ function closeOverlayWindow() {
   const target = overlayWindow
   overlayWindow = null
   if (target && !target.isDestroyed()) target.close()
+}
+
+// The danmaku belongs on whichever screen the class is watching, and that is
+// whichever screen the teacher has dragged the controls to. The overlay used to
+// take the display the session started on and stay there for the rest of the
+// lesson: move the controls to the projector and the danmaku carried on flying
+// across the laptop, where nobody was looking. Capture never had this problem
+// because it works the target display out afresh every time.
+//
+// Compares bounds rather than display ids, so a resolution change on the screen
+// it is already on moves it too.
+function followControlDisplay() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return
+  const targetDisplay = displayForBounds(safeBounds(mainWindow))
+  if (!targetDisplay) return
+  const wanted = overlayBoundsFor(targetDisplay.bounds, safeBounds(overlayWindow))
+  if (wanted) overlayWindow.setBounds(wanted)
+}
+
+// 'move' fires continuously while a window is dragged, and setBounds on another
+// window during that is both wasteful and visibly jittery. Settle first.
+let followTimer = null
+function scheduleFollowControlDisplay() {
+  if (followTimer) clearTimeout(followTimer)
+  followTimer = setTimeout(() => {
+    followTimer = null
+    followControlDisplay()
+  }, 150)
 }
 
 function createOverlayWindow(sessionId) {
@@ -305,9 +389,9 @@ function createReportWindow(sessionId, generate = false) {
   overlayVisibilitySuppressed = true
   overlayWindow?.hide()
 
+  const reportPlacement = fitAndCentre(displayForBounds(safeBounds(mainWindow)).workArea, 1120, 820, 12)
   reportWindow = new BrowserWindow({
-    width: 1120,
-    height: 820,
+    ...reportPlacement,
     minWidth: 840,
     minHeight: 620,
     frame: false,
@@ -325,13 +409,7 @@ function createReportWindow(sessionId, generate = false) {
     },
   })
 
-  if (process.platform === 'win32') reportWindow.setAppDetails({
-    appId: APP_USER_MODEL_ID,
-    appIconPath: APP_RELAUNCH_ICON_PATH,
-    appIconIndex: 0,
-    relaunchCommand: `"${APP_EXECUTABLE_PATH}"`,
-    relaunchDisplayName: 'InterAct',
-  })
+  applyTaskbarIdentity(reportWindow)
   configureWebContents(reportWindow)
 
   loadAppRoute(reportWindow, `/session-report/${sessionId}${generate ? '?generate=1' : ''}`)
@@ -403,13 +481,7 @@ function createRosterWindow(sessionId) {
     },
   })
 
-  if (process.platform === 'win32') rosterWindow.setAppDetails({
-    appId: APP_USER_MODEL_ID,
-    appIconPath: APP_RELAUNCH_ICON_PATH,
-    appIconIndex: 0,
-    relaunchCommand: `"${APP_EXECUTABLE_PATH}"`,
-    relaunchDisplayName: 'InterAct',
-  })
+  applyTaskbarIdentity(rosterWindow)
   configureWebContents(rosterWindow)
   rosterWindow.setAlwaysOnTop(true, TOPMOST_LEVEL, ROSTER_RELATIVE_LEVEL)
 
@@ -427,6 +499,7 @@ function createWordCloudWindow(sessionId) {
   if (wordCloudWindow && !wordCloudWindow.isDestroyed()) {
     if (wordCloudWindow.isMinimized()) wordCloudWindow.restore()
     wordCloudWindow.setAlwaysOnTop(true, TOPMOST_LEVEL, WORD_CLOUD_RELATIVE_LEVEL)
+    mainWindow?.hide()
     wordCloudWindow.show()
     wordCloudWindow.moveTop()
     wordCloudWindow.focus()
@@ -434,11 +507,16 @@ function createWordCloudWindow(sessionId) {
   }
 
   const targetDisplay = displayForBounds(safeBounds(mainWindow))
-  const width = Math.min(1180, Math.max(860, targetDisplay.workArea.width - 120))
-  const height = Math.min(780, Math.max(600, targetDisplay.workArea.height - 120))
+  // Capped as it always was: a word cloud stretched across a 2560 wide
+  // projector is mostly whitespace.
+  const placement = fitAndCentre(
+    targetDisplay.workArea,
+    Math.min(1180, Math.max(860, targetDisplay.workArea.width - 120)),
+    Math.min(780, Math.max(600, targetDisplay.workArea.height - 120)),
+    12,
+  )
   wordCloudWindow = new BrowserWindow({
-    width,
-    height,
+    ...placement,
     minWidth: 760,
     minHeight: 520,
     frame: false,
@@ -457,13 +535,7 @@ function createWordCloudWindow(sessionId) {
     },
   })
 
-  if (process.platform === 'win32') wordCloudWindow.setAppDetails({
-    appId: APP_USER_MODEL_ID,
-    appIconPath: APP_RELAUNCH_ICON_PATH,
-    appIconIndex: 0,
-    relaunchCommand: `"${APP_EXECUTABLE_PATH}"`,
-    relaunchDisplayName: 'InterAct',
-  })
+  applyTaskbarIdentity(wordCloudWindow)
   configureWebContents(wordCloudWindow)
   wordCloudWindow.setAlwaysOnTop(true, TOPMOST_LEVEL, WORD_CLOUD_RELATIVE_LEVEL)
 
@@ -471,6 +543,7 @@ function createWordCloudWindow(sessionId) {
   wordCloudWindow.once('ready-to-show', () => {
     overlayVisibilitySuppressed = true
     overlayWindow?.hide()
+    mainWindow?.hide()
     wordCloudWindow?.show()
     wordCloudWindow?.moveTop()
     wordCloudWindow?.focus()
@@ -479,13 +552,19 @@ function createWordCloudWindow(sessionId) {
     wordCloudWindow = null
     overlayVisibilitySuppressed = false
     showOverlayInactive()
-    setTimeout(() => bringControlToFront(false), 60)
+    // Focused, not merely shown: closing the word cloud is the presenter asking
+    // for the controls back, and they were hidden rather than sent behind, so
+    // they return to whatever screen they were left on.
+    setTimeout(() => bringControlToFront(true), 60)
   })
 }
 
-function createCustomQuizReviewWindow(sessionId, questionId) {
+function createQuestionDetailWindow(route, title) {
   if (quizReviewWindow && !quizReviewWindow.isDestroyed()) {
-    loadAppRoute(quizReviewWindow, `/custom-quiz-review/${sessionId}/${questionId}`)
+    overlayVisibilitySuppressed = true
+    overlayWindow?.hide()
+    mainWindow?.hide()
+    loadAppRoute(quizReviewWindow, route)
     if (quizReviewWindow.isMinimized()) quizReviewWindow.restore()
     quizReviewWindow.show()
     quizReviewWindow.moveTop()
@@ -493,12 +572,13 @@ function createCustomQuizReviewWindow(sessionId, questionId) {
     return
   }
 
-  const targetDisplay = displayForBounds(safeBounds(mainWindow))
-  const workArea = targetDisplay.workArea
-  const width = Math.max(800, Math.round(workArea.width * 0.8))
-  const height = Math.max(600, Math.round(workArea.height * 0.8))
-  const x = workArea.x + Math.round((workArea.width - width) / 2)
-  const y = workArea.y + Math.round((workArea.height - height) / 2)
+  const workArea = displayForBounds(safeBounds(mainWindow)).workArea
+  const { x, y, width, height } = fitAndCentre(
+    workArea,
+    Math.max(800, Math.round(workArea.width * 0.8)),
+    Math.max(600, Math.round(workArea.height * 0.8)),
+    12,
+  )
 
   overlayVisibilitySuppressed = true
   overlayWindow?.hide()
@@ -517,7 +597,7 @@ function createCustomQuizReviewWindow(sessionId, questionId) {
     maximizable: true,
     alwaysOnTop: true,
     backgroundColor: '#f7f8fb',
-    title: 'InterAct 自訂測驗檢視',
+    title,
     icon: APP_WINDOW_ICON_PATH,
     webPreferences: {
       contextIsolation: true,
@@ -527,16 +607,31 @@ function createCustomQuizReviewWindow(sessionId, questionId) {
     },
   })
   quizReviewWindow = nextQuizReviewWindow
-  if (process.platform === 'win32') nextQuizReviewWindow.setAppDetails({
-    appId: APP_USER_MODEL_ID,
-    appIconPath: APP_RELAUNCH_ICON_PATH,
-    appIconIndex: 0,
-    relaunchCommand: `"${APP_EXECUTABLE_PATH}"`,
-    relaunchDisplayName: 'InterAct',
-  })
+  applyTaskbarIdentity(nextQuizReviewWindow)
   configureWebContents(nextQuizReviewWindow)
   nextQuizReviewWindow.setAlwaysOnTop(true, TOPMOST_LEVEL, QUIZ_REVIEW_RELATIVE_LEVEL)
-  loadAppRoute(nextQuizReviewWindow, `/custom-quiz-review/${sessionId}/${questionId}`)
+  loadAppRoute(nextQuizReviewWindow, route)
+  // A detail window that dies takes the presenter's controls with it, because
+  // they were hidden to make room for it — so the presenter is left with no
+  // window at all and calls it a crash. None of this should ever fire; if it
+  // does, it says which of the three things went wrong and puts the controls
+  // back rather than leaving the room staring at nothing.
+  nextQuizReviewWindow.webContents.on('did-fail-load', (_event, code, description, url) => {
+    console.error('detail window failed to load', { route, code, description, url })
+  })
+  nextQuizReviewWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('detail window renderer gone', { route, ...details })
+    if (!nextQuizReviewWindow.isDestroyed()) nextQuizReviewWindow.close()
+  })
+  nextQuizReviewWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
+    console.error('detail window preload failed', { route, preloadPath, message: error?.message })
+  })
+  // Anything the page itself throws. Without this a blank window is the only
+  // symptom of an error the renderer printed to a console nobody can open.
+  nextQuizReviewWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 2) console.error('detail window console', { route, message, line, sourceId })
+  })
+
   nextQuizReviewWindow.once('ready-to-show', () => {
     nextQuizReviewWindow.show()
     nextQuizReviewWindow.moveTop()
@@ -576,18 +671,23 @@ function setControlBounds(expanded, snapToTopRight = false, settingsOpen = false
   const current = lastControlBounds || safeBounds(mainWindow) || screen.getPrimaryDisplay().workArea
   const display = displayForBounds(current)
   const workArea = display.workArea
+  // A window bigger than the screen has room for is one whose buttons are off
+  // the bottom edge: 設定 asks for 760 and a 1366x768 laptop has 728.
+  const width = Math.min(size.width, workArea.width - WINDOW_MARGIN * 2)
+  const height = Math.min(size.height, workArea.height - WINDOW_MARGIN * 2)
   const right = snapToTopRight ? workArea.x + workArea.width - WINDOW_MARGIN : current.x + current.width
-  const x = clamp(right - size.width, workArea.x + WINDOW_MARGIN, workArea.x + workArea.width - size.width - WINDOW_MARGIN)
+  const x = clamp(right - width, workArea.x + WINDOW_MARGIN, workArea.x + workArea.width - width - WINDOW_MARGIN)
   const y = snapToTopRight
     ? workArea.y + WINDOW_MARGIN
-    : clamp(current.y, workArea.y + WINDOW_MARGIN, workArea.y + workArea.height - size.height - WINDOW_MARGIN)
+    : clamp(current.y, workArea.y + WINDOW_MARGIN, workArea.y + workArea.height - height - WINDOW_MARGIN)
 
-  const bounds = { x, y, ...size }
+  const bounds = { x, y, width, height }
   mainWindow.setBounds(bounds, true)
   lastControlBounds = bounds
 }
 
 async function listCaptureSources(targetDisplay = screen.getPrimaryDisplay(), types = ['screen', 'window']) {
+  assertScreenCaptureIsNotBlocked()
   const captureWidth = Math.round(targetDisplay.size.width * targetDisplay.scaleFactor)
   const captureHeight = Math.round(targetDisplay.size.height * targetDisplay.scaleFactor)
   const sources = await desktopCapturer.getSources({
@@ -596,8 +696,15 @@ async function listCaptureSources(targetDisplay = screen.getPrimaryDisplay(), ty
       width: Math.max(1920, captureWidth),
       height: Math.max(1080, captureHeight),
     },
-    fetchWindowIcons: true,
+    fetchWindowIcons: types.includes('window'),
   })
+
+  if (process.platform === 'darwin' && systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
+    openScreenCaptureSettings()
+    throw new Error('macOS 尚未完成螢幕擷取授權。請允許 InterAct；若剛剛已允許，請重新啟動程式後再截圖。')
+  }
+
+  if (!sources.length) throw new Error('系統沒有回傳任何可截取的螢幕。請確認外接螢幕仍連線，然後再試一次。')
 
   return sources.map((source) => ({
     id: source.id,
@@ -609,6 +716,36 @@ async function listCaptureSources(targetDisplay = screen.getPrimaryDisplay(), ty
     appIconDataUrl: source.appIcon?.toDataURL() || null,
   }))
 }
+
+function captureSourceForDisplay(sources, targetDisplay) {
+  const exactDisplayId = sources.find((source) => source.displayId === String(targetDisplay.id))
+  if (exactDisplayId) return exactDisplayId
+
+  // display_id is the only guaranteed mapping, but older macOS/Electron builds
+  // may leave it empty for an external display. Prefer the source whose pixel
+  // shape matches the target instead of assuming source order equals Screen
+  // API order (Electron explicitly does not guarantee that numbering).
+  const expectedWidth = Math.round(targetDisplay.size.width * targetDisplay.scaleFactor)
+  const expectedHeight = Math.round(targetDisplay.size.height * targetDisplay.scaleFactor)
+  const expectedRatio = expectedWidth / Math.max(1, expectedHeight)
+  const sizedSources = sources.filter((source) => source.width > 0 && source.height > 0)
+  if (!sizedSources.length) return null
+
+  return [...sizedSources].sort((left, right) => {
+    const leftRatio = Math.abs((left.width / left.height) - expectedRatio)
+    const rightRatio = Math.abs((right.width / right.height) - expectedRatio)
+    const leftSize = Math.abs(left.width - expectedWidth) + Math.abs(left.height - expectedHeight)
+    const rightSize = Math.abs(right.width - expectedWidth) + Math.abs(right.height - expectedHeight)
+    return (leftRatio - rightRatio) || (leftSize - rightSize)
+  })[0]
+}
+
+ipcMain.on('config:read-portable', (event) => {
+  event.returnValue = portableConfig.readConfig(PORTABLE_CONFIG_DIRECTORY)
+})
+ipcMain.on('config:write-portable', (event, input) => {
+  event.returnValue = portableConfig.writeConfig(PORTABLE_CONFIG_DIRECTORY, input)
+})
 
 ipcMain.handle('window:presenter-mode', (_event, sessionId) => {
   if (!mainWindow) return
@@ -674,9 +811,7 @@ ipcMain.handle('lottery:set-interactive', (_event, enabled) => {
     overlayWindow.show()
     overlayWindow.focus()
   } else {
-    // macOS keeps keyboard focus on a window after setFocusable(false); drop it
-    // explicitly so slideshow arrow keys go back to the presentation app.
-    overlayWindow.blur()
+    if (process.platform === 'darwin') overlayWindow.blur()
     overlayWindow.setFocusable(false)
     showOverlayInactive()
     setTimeout(bringControlToFront, 60)
@@ -738,21 +873,48 @@ ipcMain.handle('window:open-word-cloud', (_event, sessionId) => {
 ipcMain.handle('window:open-custom-quiz-review', (_event, sessionId, questionId) => {
   requireUuid(sessionId)
   requireUuid(questionId, 'question')
-  createCustomQuizReviewWindow(sessionId, questionId)
+  createQuestionDetailWindow(`/custom-quiz-review/${sessionId}/${questionId}`, 'InterAct 自訂測驗檢視')
 })
 
-ipcMain.handle('capture:list', () => listCaptureSources())
+ipcMain.handle('window:open-hotspot-review', (_event, sessionId, questionId) => {
+  requireUuid(sessionId)
+  requireUuid(questionId, 'question')
+  createQuestionDetailWindow(`/hotspot-review/${sessionId}/${questionId}`, 'InterAct 圖上點選檢視')
+})
+
+ipcMain.handle('window:open-board-review', (_event, sessionId, questionId) => {
+  requireUuid(sessionId)
+  requireUuid(questionId, 'question')
+  createQuestionDetailWindow(`/board-review/${sessionId}/${questionId}`, 'InterAct 討論板')
+})
+
+ipcMain.handle('window:open-submission-review', (_event, sessionId, questionId) => {
+  requireUuid(sessionId)
+  requireUuid(questionId, 'question')
+  createQuestionDetailWindow(`/submission-review/${sessionId}/${questionId}`, 'InterAct 作答檢視')
+})
+
+ipcMain.handle('window:open-ordering-review', (_event, sessionId, questionId) => {
+  requireUuid(sessionId)
+  requireUuid(questionId, 'question')
+  createQuestionDetailWindow(`/ordering-review/${sessionId}/${questionId}`, 'InterAct 排序題檢視')
+})
+
+ipcMain.handle('window:open-camera-poll', (_event, sessionId) => {
+  if (!/^[a-f0-9-]{36}$/i.test(sessionId)) return
+  createQuestionDetailWindow(`/camera-poll/${sessionId}`, 'InterAct 全班姿態回應')
+})
+
+ipcMain.handle('capture:list', listCaptureSources)
 
 ipcMain.handle('capture:start-selection', async () => {
   if (!mainWindow || mainWindow.isDestroyed()) throw new Error('InterAct presenter window is unavailable.')
 
   if (process.platform === 'darwin') {
-    // desktopCapturer needs the Screen Recording permission. macOS prompts on
-    // first use ('not-determined'); once denied it silently returns blank frames.
     const status = systemPreferences.getMediaAccessStatus('screen')
     if (status === 'denied' || status === 'restricted') {
       void shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
-      throw new Error('InterAct 沒有「螢幕錄製」權限。請到 系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製 開啟 InterAct，然後重新啟動 InterAct。')
+      throw new Error('InterAct 沒有「螢幕錄製」權限。請到系統設定開啟權限，再重新啟動 InterAct。')
     }
   }
 
@@ -765,10 +927,23 @@ ipcMain.handle('capture:start-selection', async () => {
     await new Promise((resolve) => setTimeout(resolve, 160))
 
     const sources = await listCaptureSources(targetDisplay, ['screen'])
-    const displayIndex = screen.getAllDisplays().findIndex((display) => display.id === targetDisplay.id)
-    const captureSource = sources.find((source) => source.displayId === String(targetDisplay.id))
-      || sources.find((source) => source.id.startsWith(`screen:${displayIndex}:`))
-      || sources[displayIndex]
+    writeDiagnostic({
+      event: 'capture-sources-ready',
+      platform: process.platform,
+      permission: process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('screen') : 'granted',
+      targetDisplayId: targetDisplay.id,
+      targetWidth: targetDisplay.size.width,
+      targetHeight: targetDisplay.size.height,
+      targetScaleFactor: targetDisplay.scaleFactor,
+      sources: sources.map((source) => ({
+        id: source.id,
+        displayId: source.displayId,
+        name: source.name,
+        width: source.width,
+        height: source.height,
+      })),
+    })
+    const captureSource = captureSourceForDisplay(sources, targetDisplay)
     if (!captureSource) throw new Error('找不到可截取的螢幕來源。')
 
     mainWindow.setBounds(targetDisplay.bounds)
@@ -799,11 +974,20 @@ app.whenReady().then(() => {
   createWindow()
 
   for (const eventName of ['display-added', 'display-removed', 'display-metrics-changed']) {
-    screen.on(eventName, () => showOverlayInactive())
+    screen.on(eventName, () => {
+      // A screen that has just appeared, gone, or changed resolution can leave
+      // the overlay sized for a layout that no longer exists.
+      followControlDisplay()
+      showOverlayInactive()
+    })
   }
 
   app.on('activate', () => {
-    if (reportWindow && !reportWindow.isDestroyed()) {
+    if (quizReviewWindow && !quizReviewWindow.isDestroyed()) {
+      if (quizReviewWindow.isMinimized()) quizReviewWindow.restore()
+      quizReviewWindow.show()
+      quizReviewWindow.focus()
+    } else if (reportWindow && !reportWindow.isDestroyed()) {
       reportWindow.show()
       reportWindow.focus()
     } else if (mainWindow && !mainWindow.isDestroyed()) {

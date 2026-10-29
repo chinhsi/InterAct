@@ -1,5 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { getOwnerKey } from './ownerKey'
+import { guardRealtimeTables } from './realtimeGuard'
+import { boundedFetch } from './boundedFetch'
 
 const STORAGE_KEY = 'interact:backend'
 
@@ -46,8 +48,9 @@ function fromStorage(): BackendConfig | null {
 function fromBuild(): BackendConfig | null {
   const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
   const key = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
+  const appUrl = import.meta.env.VITE_PUBLIC_APP_URL as string | undefined
   if (!url || !key) return null
-  return { ref: new URL(url).hostname.split('.')[0], url: url.replace(/\/$/, ''), key }
+  return { ref: new URL(url).hostname.split('.')[0], url: url.replace(/\/$/, ''), key, appUrl: appUrl?.replace(/\/$/, '') || undefined }
 }
 
 function remember(config: BackendConfig) {
@@ -60,23 +63,31 @@ function remember(config: BackendConfig) {
 
 const linked = fromJoinLink()
 if (linked) remember(linked)
+export const portableBackendState = typeof window !== 'undefined'
+  ? window.interactDesktop?.getPortableBackendConfig?.() : undefined
+const portableBackend = portableBackendState?.ok && portableBackendState.config
+  ? build(portableBackendState.config.ref, portableBackendState.config.key, portableBackendState.config.appUrl) : null
 
 // A join link always wins: it is how a student reaches a project this build was
 // never configured for. Otherwise fall back to the last one used, then to the
 // values baked in at build time.
-const config = linked || fromStorage() || fromBuild()
+// A sidecar travels with this copy of the app. Never silently substitute the
+// host computer's previous project when that file is cleared or invalid.
+const config = linked || (portableBackendState?.hasFile ? portableBackend : fromStorage() || fromBuild())
 
 export const backendConfig = config
 export const isSupabaseConfigured = Boolean(config)
 
 export const supabase = config
-  ? createClient(config.url, config.key, {
+  ? guardRealtimeTables(createClient(config.url, config.key, {
+      global: { fetch: boundedFetch },
+      db: { schema: 'interact' },
       realtime: { params: { eventsPerSecond: 20 } },
-    })
+    }))
   : null
 
 // Functions that act on the teacher's behalf rather than a student's.
-const ownerFunctions = new Set(['create-session', 'presenter-action', 'gemini-caption-relay', 'openai-realtime-session'])
+const ownerFunctions = new Set(['create-session', 'presenter-action', 'analyze-session', 'gemini-caption-relay', 'openai-realtime-session'])
 
 // Attached here rather than at each call site: there are dozens of them, and a
 // credential that is only present when someone remembered to pass it is not a
@@ -92,6 +103,10 @@ if (supabase) {
   if (!prototype.__interactOwnerKey) {
     const original = prototype.invoke
     prototype.invoke = function patched(this: unknown, name: string, options?: InvokeOptions) {
+      const action = (options?.body as { action?: unknown } | undefined)?.action
+      if ((name === 'participant-action' || name === 'presenter-action') && typeof action === 'string' && action.startsWith('get_') && !options?.timeout) {
+        options = { ...options, timeout: 20_000 }
+      }
       const ownerKey = getOwnerKey()
       const body = options?.body
       if (ownerKey && ownerFunctions.has(name) && body && typeof body === 'object'
@@ -121,7 +136,7 @@ export const authReady: Promise<void> = (async () => {
 
 export function requireSupabase() {
   if (!supabase) {
-    throw new Error('Supabase 尚未設定。請建立 .env 並填入 VITE_SUPABASE_URL 與 VITE_SUPABASE_ANON_KEY。')
+    throw new Error('Supabase 尚未設定。請在系統設定填入後端連線資訊。')
   }
 
   return supabase
@@ -147,34 +162,50 @@ export function saveBackendConfig(input: { ref: string; key: string; appUrl?: st
     return { ok: false, message: '學員端網址必須以 https:// 開頭。' }
   }
 
+  const portableSave = window.interactDesktop?.savePortableBackendConfig?.({ ref, key, appUrl: appUrl || undefined })
+  if (portableSave && !portableSave.ok) return portableSave
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ ref, key, appUrl: appUrl || undefined }))
   } catch {
+    if (portableSave?.ok) return { ok: true }
     return { ok: false, message: '無法寫入本機設定，請確認瀏覽器或系統允許儲存資料。' }
   }
   return { ok: true }
 }
 
-export function clearBackendConfig() {
+export function clearBackendConfig(): SaveResult {
+  const portableSave = window.interactDesktop?.savePortableBackendConfig?.({ ref: '', key: '' })
+  if (portableSave && !portableSave.ok) return portableSave
   try {
     window.localStorage.removeItem(STORAGE_KEY)
   } catch {
     // Nothing to clear if storage is unavailable.
   }
+  return { ok: true }
 }
 
 // Checks the project answers before the presenter commits to it, so a typo is
 // caught here instead of halfway through a class.
 export async function testBackendConfig(ref: string, key: string) {
   const response = await fetch(`https://${ref}.supabase.co/rest/v1/sessions?select=id&limit=1`, {
-    headers: { apikey: key, Authorization: `Bearer ${key}` },
+    // This fork hosts InterAct in its own exposed schema. Another application
+    // may already own public.sessions, so probing public gives a false result.
+    headers: { apikey: key, Authorization: `Bearer ${key}`, 'Accept-Profile': 'interact' },
   })
   if (response.ok) return { ok: true as const }
   if (response.status === 401 || response.status === 403) {
     return { ok: false as const, message: '金鑰無效或權限不足，請確認貼上的是 publishable key。' }
   }
   if (response.status === 404) {
-    return { ok: false as const, message: '連得上專案，但找不到 sessions 資料表 —— 請先在 Supabase 執行 schema.sql。' }
+    // The one failure with a button for it on the same screen. Telling people
+    // to go and run schema.sql by hand sent them off to do the very thing the
+    // 自動部署 section below does for them, which most never opened because
+    // nothing pointed at it.
+    return {
+      ok: false as const,
+      needsSchema: true,
+      message: '連得上專案，但這個專案還沒有 InterAct 的資料表。請展開下面的「還沒建立後端？讓 InterAct 幫你部署」自動建立。',
+    }
   }
   return { ok: false as const, message: `連線失敗（HTTP ${response.status}）。` }
 }

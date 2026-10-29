@@ -1,0 +1,293 @@
+// What each student is told about their own standing, and how it gets to them.
+//
+// The number a student sees has to be the number on the teacher's list, or the
+// two are worth less than either alone. That list is `participationRows`, which
+// needs the whole class — every answer, message, quiz attempt, marked upload
+// and board card — and no student may read most of that, nor should 145 devices
+// each fetch it: that load is exactly what took the 145-person session down.
+//
+// So the presenter's own window works it out, once, on the machine that already
+// has the authority to read all of it, and broadcasts each student their own
+// line. The scoring rule stays in one place, the class does no extra querying,
+// and the roster window can stay shut — it is a separate window that is open
+// only when the teacher opens it, which is why the calculation cannot live
+// there.
+//
+// The broadcast carries no names. A student can see the shape of the class from
+// it, which is what a rank is, but not who anyone is.
+
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { buzzerWinsFrom, participationRows } from './participation'
+import type { Badge } from './participation'
+import { getReportCredentials } from './presenterAuth'
+import { createBatchedRefresh, createRealtimeSnapshot } from './realtimeSnapshot'
+import { logDiagnostic } from './diagnostics'
+import { requireSupabase } from './supabase'
+import type {
+  Answer, BoardPost, FileResponse, Message, Participant, ParticipantPoint,
+  Question, SessionCustomQuizResults, SessionEvent,
+} from '../types'
+
+export type Standing = {
+  id: string
+  score: number
+  rank: number
+  classSize: number
+  badges: Badge[]
+}
+
+const CHANNEL = (sessionId: string) => `standings:${sessionId}`
+const REFRESH_MS = 30_000
+
+// Runs on the presenter's main window, which is open for the whole class.
+export function useStandingsBroadcast(sessionId: string, presenceKey: string) {
+  const publishRef = useRef<(() => void) | null>(null)
+  const cache = useRef(createRealtimeSnapshot())
+  const fullRefresh = useRef(true)
+  const ready = useRef(false)
+  const generation = useRef(0)
+  const dirtyPrivate = useRef(new Set(['quiz', 'uploads', 'board']))
+  const privateData = useRef<{ quiz: SessionCustomQuizResults | null; uploads: FileResponse[] }>({ quiz: null, uploads: [] })
+  const forceSend = useRef(0)
+  const privateRetryAt = useRef(new Map<string, number>())
+
+  const compute = useCallback(async (): Promise<Standing[]> => {
+    const startedGeneration = generation.current
+    const current = () => startedGeneration === generation.current
+    const supabase = requireSupabase()
+    if (fullRefresh.current || !ready.current) {
+      fullRefresh.current = false
+      cache.current.begin()
+      try {
+        const [p, q, a, m, e, pt] = await Promise.all([
+          supabase.from('participants').select('*').eq('session_id', sessionId).order('joined_at').limit(5000),
+          supabase.from('questions').select('*').eq('session_id', sessionId).order('created_at').limit(500),
+          supabase.from('answers').select('*').eq('session_id', sessionId).limit(10000),
+          supabase.from('messages').select('*').eq('session_id', sessionId).limit(5000),
+          supabase.from('session_events').select('*').eq('session_id', sessionId).eq('event_type', 'buzzer').limit(2000),
+          supabase.from('participant_points').select('*').eq('session_id', sessionId).limit(5000),
+        ])
+        if (!current()) return []
+        for (const result of [p, q, a, m, e, pt]) if (result.error) throw result.error
+        cache.current.replace({ participants: p.data || [], questions: q.data || [], answers: a.data || [], messages: m.data || [], session_events: e.data || [], participant_points: pt.data || [] })
+        ready.current = true
+        for (const source of ['quiz', 'uploads', 'board']) dirtyPrivate.current.add(source)
+      } catch (error) {
+        if (current()) { cache.current.abort(); fullRefresh.current = true }
+        throw error
+      }
+    }
+
+    // Private to the presenter, so they come back through the action rather
+    // than the table. Without them the score would be lower than the roster's
+    // for anyone who sat a quiz or handed in a photograph.
+    const actions: Record<string, string> = { quiz: 'get_session_custom_quiz_results', uploads: 'get_file_responses', board: 'get_session_board_posts' }
+    await Promise.allSettled([...dirtyPrivate.current].filter(source => (privateRetryAt.current.get(source) || 0) <= Date.now()).map(async source => {
+      dirtyPrivate.current.delete(source)
+      try {
+        const credentials = getReportCredentials(sessionId)
+        // Board events can arrive while this private snapshot is loading too.
+        if (source === 'board') cache.current.begin()
+        const result = await supabase.functions.invoke('presenter-action', { body: { action: actions[source], ...credentials } })
+        if (!current()) return
+        if (result.error || !result.data) throw result.error || new Error('Missing score source')
+        if (source === 'quiz') privateData.current.quiz = result.data as SessionCustomQuizResults
+        if (source === 'uploads') privateData.current.uploads = (result.data.responses || []) as FileResponse[]
+        if (source === 'board') {
+          cache.current.replace({ board_posts: result.data.posts || [] })
+        }
+        privateRetryAt.current.delete(source)
+      } catch {
+        if (current()) {
+          if (source === 'board') cache.current.abort()
+          dirtyPrivate.current.add(source)
+          if (!privateRetryAt.current.has(source)) logDiagnostic('standings_private_source_failed', { source })
+          privateRetryAt.current.set(source, Date.now() + 5000)
+        }
+      }
+    }))
+    if (!current()) return []
+    // One optional source failing must not freeze every student's live points.
+    // Retain its last good data while messages, answers and manual points keep
+    // updating; a later successful retry reconciles the remaining sources.
+
+    const participants = cache.current.rows<Participant>('participants').filter(entry => !entry.removed_at)
+    const quiz = privateData.current.quiz
+    const rows = participationRows({
+      participants,
+      questions: cache.current.rows<Question>('questions'),
+      answers: cache.current.rows<Answer>('answers'),
+      messages: cache.current.rows<Message>('messages'),
+      quizAttempts: quiz?.attempts || [],
+      buzzerWins: buzzerWinsFrom(cache.current.rows<SessionEvent>('session_events')),
+      uploadMarks: privateData.current.uploads,
+      boardPosts: cache.current.rows<BoardPost>('board_posts'),
+      // Null for the same reason the roster passes null: the class is running,
+      // so the absence clock runs to now. The two have to agree.
+      endedAt: null,
+    })
+
+    // The teacher's manual awards are part of the figure on the roster, so they
+    // are part of this one too.
+    const awarded = new Map<string, number>()
+    for (const point of cache.current.rows<ParticipantPoint>('participant_points')) {
+      awarded.set(point.participant_id, (awarded.get(point.participant_id) || 0) + point.points)
+    }
+
+    const totals = rows.map((row) => ({
+      id: row.participant.id,
+      score: row.score + (awarded.get(row.participant.id) || 0),
+      badges: row.badges,
+    }))
+    // Equal scores share a place, which is what anyone reading "第 3 名"
+    // expects when two people are level — and the next place down skips, so
+    // the last number still matches the size of the class.
+    const ordered = [...totals].sort((left, right) => right.score - left.score)
+    let rank = 0
+    let previousScore: number | null = null
+    return ordered.map((entry, index) => {
+      if (previousScore === null || entry.score !== previousScore) {
+        rank = index + 1
+        previousScore = entry.score
+      }
+      return { ...entry, rank, classSize: ordered.length }
+    })
+  }, [sessionId])
+
+  useEffect(() => {
+    if (!sessionId) return
+    const supabase = requireSupabase()
+    const channel = supabase.channel(CHANNEL(sessionId), { config: { broadcast: { ack: true } } })
+    generation.current++
+    const invalidateGeneration = () => { generation.current++ }
+    cache.current = createRealtimeSnapshot()
+    ready.current = false
+    fullRefresh.current = true
+    privateData.current = { quiz: null, uploads: [] }
+    dirtyPrivate.current = new Set(['quiz', 'uploads', 'board'])
+    privateRetryAt.current = new Map()
+    forceSend.current++
+
+    let active = true
+    let lastPayload = ''
+    let lastForcedVersion = -1
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let sendFailures = 0
+    const retry = (delay: number) => {
+      if (!active || retryTimer !== null) return
+      retryTimer = setTimeout(() => { retryTimer = null; if (active) batch.request() }, delay)
+    }
+    const batch = createBatchedRefresh(async () => {
+      if (!active || navigator.onLine === false) return
+      try {
+        const rows = await compute()
+        if (!active || !rows.length) return
+        if (privateRetryAt.current.size) retry(5000)
+        const signature = JSON.stringify(rows)
+        const forcedVersion = forceSend.current
+        if (forcedVersion === lastForcedVersion && signature === lastPayload) return
+        const result = await channel.send({ type: 'broadcast', event: 'standings', payload: { rows, sentAt: Date.now() } })
+        if (result === 'ok') { lastPayload = signature; lastForcedVersion = forcedVersion; sendFailures = 0 }
+        else {
+          sendFailures++
+          logDiagnostic('standings_send_failed', { result })
+          if (sendFailures <= 3) retry(1500 * sendFailures)
+        }
+      } catch {
+        logDiagnostic('standings_refresh_failed')
+        // A class that cannot be scored still runs. Nothing here is worth
+        // interrupting a lesson for.
+      }
+    })
+
+    publishRef.current = () => { forceSend.current++; batch.request() }
+    channel.on('broadcast', { event: 'score_sources_changed' }, message => {
+      if (message.payload?.source !== 'quiz') return
+      dirtyPrivate.current.add('quiz')
+      batch.request()
+    })
+    for (const table of ['participants', 'questions', 'answers', 'messages', 'session_events', 'participant_points', 'board_posts']) {
+      channel.on('postgres_changes', { event: '*', schema: 'interact', table, filter: `session_id=eq.${sessionId}` }, payload => {
+        if (!active) return
+        const row = (payload.eventType === 'DELETE' ? payload.old : payload.new) as Record<string, unknown>
+        if (row.session_id && row.session_id !== sessionId) return
+        cache.current.update(table, payload)
+        if (table === 'answers' || table === 'questions') {
+          const questionId = table === 'questions' ? row.id : row.question_id
+          const type = cache.current.rows<Question>('questions').find(question => question.id === questionId)?.type
+          if (type === 'custom_quiz') dirtyPrivate.current.add('quiz')
+          if (type === 'drawing' || type === 'file_upload') dirtyPrivate.current.add('uploads')
+        }
+        batch.request()
+      })
+    }
+
+    channel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') { fullRefresh.current = true; forceSend.current++; batch.request() }
+    })
+    const resync = () => { fullRefresh.current = true; forceSend.current++; batch.request() }
+    window.addEventListener('online', resync)
+    const timer = window.setInterval(resync, REFRESH_MS)
+
+    return () => {
+      active = false
+      invalidateGeneration()
+      batch.stop()
+      if (retryTimer !== null) clearTimeout(retryTimer)
+      window.removeEventListener('online', resync)
+      window.clearInterval(timer)
+      publishRef.current = null
+      void supabase.removeChannel(channel)
+    }
+  }, [compute, sessionId])
+
+  // Somebody arrived, left, or reloaded their page, so send again rather than
+  // leaving them looking at nothing until the next sweep. A reload drops the
+  // student out of presence and puts them back, which is what makes this fire
+  // for a refresh and not only for a new joiner.
+  //
+  // Doing it from this side is what keeps the cost linear: if each new page
+  // asked for itself, every request would reach all of the others as well, and
+  // a class that starts together would open with a square's worth of messages.
+  useEffect(() => {
+    if (!presenceKey || !publishRef.current) return
+    const timer = window.setTimeout(() => publishRef.current?.(), 350)
+    return () => window.clearTimeout(timer)
+  }, [presenceKey])
+}
+
+// Runs on each student's page. One channel, no queries, and nothing arrives
+// that is not about this class.
+export function useMyStanding(sessionId: string, participantId: string | null, onHandsLowered?: () => void) {
+  const [standing, setStanding] = useState<Standing | null>(null)
+  const handsLoweredRef = useRef(onHandsLowered)
+  handsLoweredRef.current = onHandsLowered
+
+  useEffect(() => {
+    if (!sessionId || !participantId) return
+    const supabase = requireSupabase()
+    const channel = supabase.channel(CHANNEL(sessionId))
+    let newest = 0
+
+    channel.on('broadcast', { event: 'standings' }, (message) => {
+      const payload = message.payload as { rows?: Standing[]; sentAt?: number } | undefined
+      if (typeof payload?.sentAt === 'number' && payload.sentAt < newest) return
+      if (typeof payload?.sentAt === 'number') newest = payload.sentAt
+      const rows = payload?.rows
+      if (!Array.isArray(rows)) return
+      setStanding(rows.find((row) => row.id === participantId) || null)
+    })
+    channel.on('broadcast', { event: 'hands_lowered' }, message => {
+      const target = (message.payload as { participantId?: unknown } | undefined)?.participantId
+      if (target === '' || target === participantId) handsLoweredRef.current?.()
+    })
+
+    // Listening only. The presenter sends when the class changes size, so a
+    // page that has just opened is answered without asking.
+    channel.subscribe()
+
+    return () => { void supabase.removeChannel(channel) }
+  }, [participantId, sessionId])
+
+  return standing
+}

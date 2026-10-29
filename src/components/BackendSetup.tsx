@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { CheckCircle2, CircleDashed, ExternalLink, KeyRound, LoaderCircle, Rocket, Save, Server, XCircle } from 'lucide-react'
-import { backendConfig, clearBackendConfig, requireSupabase, saveBackendConfig, testBackendConfig } from '../lib/supabase'
-import { canDeployBackend, checkToken, deployableFunctions, deployFunction, runSchema, setOwnerKey, setSecrets, verifyBackend } from '../lib/backendDeploy'
+import { backendConfig, clearBackendConfig, portableBackendState, requireSupabase, saveBackendConfig, testBackendConfig } from '../lib/supabase'
+import { canDeployBackend, checkToken, deployableFunctions, deployFunction, runSchema, setOwnerKey, setSecrets, verifyBackend, verifyPublicAccess } from '../lib/backendDeploy'
 import { generateOwnerKey, getOwnerKey, saveOwnerKey } from '../lib/ownerKey'
 import type { DeployStep } from '../lib/backendDeploy'
 
@@ -26,6 +26,9 @@ export function BackendSetup({ onCancel }: Props) {
   const [token, setToken] = useState('')
   const [geminiKey, setGeminiKey] = useState('')
   const [openaiKey, setOpenaiKey] = useState('')
+  // Opened by the screen itself when the project turns out to be empty, which
+  // is exactly what this section exists to fix.
+  const [helpOpen, setHelpOpen] = useState(false)
   const [reurlKey, setReurlKey] = useState('')
   const [steps, setSteps] = useState<DeployStep[]>([])
   const [deploying, setDeploying] = useState(false)
@@ -52,6 +55,7 @@ export function BackendSetup({ onCancel }: Props) {
       { slug: '設定 API 金鑰', status: 'pending' },
       { slug: '產生管理金鑰', status: 'pending' },
       { slug: '檢查部署結果', status: 'pending' },
+      { slug: '確認學生端讀得到', status: 'pending' },
     ]
     setSteps(plan)
     setDeploying(true)
@@ -94,6 +98,7 @@ export function BackendSetup({ onCancel }: Props) {
           setOwnerKeyState(key)
         },
         () => verifyBackend(cleanRef, token.trim()),
+        () => verifyPublicAccess(cleanRef, key.trim()),
       ]
 
       let failed = false
@@ -176,6 +181,9 @@ export function BackendSetup({ onCancel }: Props) {
         setNotice('連線成功，可以儲存了。')
       } else {
         setError(result.message)
+        // An empty project is the one failure the screen can fix by itself, so
+        // the section that fixes it opens rather than waiting to be found.
+        if ('needsSchema' in result && result.needsSchema) setHelpOpen(true)
       }
     } catch {
       setError('連線失敗，請確認網路與專案識別碼。')
@@ -196,7 +204,8 @@ export function BackendSetup({ onCancel }: Props) {
   }
 
   function reset() {
-    clearBackendConfig()
+    const result = clearBackendConfig()
+    if (!result.ok) { setError(result.message); return }
     window.location.reload()
   }
 
@@ -214,10 +223,16 @@ export function BackendSetup({ onCancel }: Props) {
         <span className="form-heading-icon"><Server size={24} /></span>
         <h1>{embedded ? '系統設定' : '連接你的 Supabase 專案'}</h1>
         <p className="muted">
-          InterAct 使用你自己的 Supabase 專案存放課堂資料，資料不會經過其他人。
+          InterAct 使用你自己的 <a href="https://supabase.com/dashboard" target="_blank" rel="noopener noreferrer">Supabase</a> 專案存放課堂資料，資料不會經過其他人。
           填入專案資訊後即可開始使用。
+          {' '}第一次部署請先閱讀 <a href="https://interact.ehuayu.org/about/#deployment" target="_blank" rel="noopener noreferrer">部署 Step by Step 教學</a>。
         </p>
 
+        {portableBackendState && <p className={portableBackendState.ok ? 'field-hint' : 'error'} style={{ overflowWrap: 'anywhere' }}>
+          {portableBackendState.ok
+            ? `隨身設定：儲存後會寫入 ${portableBackendState.path}。帶走整個程式資料夾即可沿用後端；管理金鑰仍需在新電腦輸入。`
+            : portableBackendState.message}
+        </p>}
         <label>
           專案識別碼或網址
           <input
@@ -294,7 +309,7 @@ export function BackendSetup({ onCancel }: Props) {
           </button>
         </div>
 
-        <details className="backend-setup-help">
+        <details className="backend-setup-help" open={helpOpen} onToggle={(event) => setHelpOpen((event.target as HTMLDetailsElement).open)}>
           <summary>還沒建立後端？讓 InterAct 幫你部署</summary>
           <p className="muted">
             在 <a href="https://supabase.com/dashboard" rel="noreferrer" target="_blank">

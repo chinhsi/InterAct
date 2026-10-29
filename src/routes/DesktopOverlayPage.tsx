@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { resolvedCaptionLanguage } from '../lib/captionLanguages'
 import { DanmakuLayer } from '../components/DanmakuLayer'
+import { useSessionPresence } from '../lib/useSessionPresence'
 import { BuzzerOverlay } from '../components/BuzzerOverlay'
 import { LotteryOverlay } from '../components/LotteryOverlay'
 import { LiveCaptionOverlay } from '../components/LiveCaptionOverlay'
@@ -22,6 +23,11 @@ export function DesktopOverlayPage() {
   const loadingRef = useRef(false)
   const captionHideTimersRef = useRef<Map<string, number>>(new Map())
 
+  // The overlay counts as the teacher being present, and it is the window that
+  // is certainly awake while a class is running — the controls are collapsed
+  // behind it, so it is the one to be sure of.
+  useSessionPresence(sessionId, { role: 'presenter' })
+
   const showCaption = useCallback((language: string, text: string) => {
     setLiveCaptions((current) => ({ ...current, [language]: text }))
     window.clearTimeout(captionHideTimersRef.current.get(language))
@@ -40,8 +46,14 @@ export function DesktopOverlayPage() {
   const mergeMessages = useCallback((incoming: Message[]) => {
     setMessages((current) => {
       const byId = new Map(current.map((message) => [message.id, message]))
-      for (const message of incoming) byId.set(message.id, message)
-      return [...byId.values()].sort((left, right) => left.created_at.localeCompare(right.created_at))
+      let changed = false
+      for (const message of incoming) {
+        if (byId.has(message.id)) continue
+        byId.set(message.id, message)
+        changed = true
+      }
+      if (!changed) return current
+      return [...byId.values()].sort((left, right) => left.created_at.localeCompare(right.created_at)).slice(-200)
     })
   }, [])
 
@@ -72,11 +84,11 @@ export function DesktopOverlayPage() {
   }, [])
 
   const loadOverlay = useCallback(async () => {
-    if (!isSupabaseConfigured || !sessionId || loadingRef.current) return
+    if (!isSupabaseConfigured || !sessionId || loadingRef.current || navigator.onLine === false) return
     loadingRef.current = true
     const supabase = requireSupabase()
     try {
-      const [{ data: sessionData }, { data: messageData }] = await Promise.all([
+      const [{ data: sessionData, error: sessionError }, { data: messageData, error: messageError }] = await Promise.all([
         supabase.from('sessions').select('*').eq('id', sessionId).single(),
         supabase
           .from('messages')
@@ -86,6 +98,7 @@ export function DesktopOverlayPage() {
           .order('created_at', { ascending: false })
           .limit(100),
       ])
+      if (sessionError || messageError || !sessionData) return
       const nextSession = sessionData as Session | null
       setSession(nextSession)
       mergeMessages((messageData || []) as Message[])
@@ -98,6 +111,11 @@ export function DesktopOverlayPage() {
 
   useEffect(() => {
     loadOverlay()
+  }, [loadOverlay])
+
+  useEffect(() => {
+    window.addEventListener('online', loadOverlay)
+    return () => window.removeEventListener('online', loadOverlay)
   }, [loadOverlay])
 
   useEffect(() => {
@@ -123,15 +141,15 @@ export function DesktopOverlayPage() {
     const supabase = requireSupabase()
     const channel = supabase
       .channel(`desktop-overlay:${sessionId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, loadOverlay)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `session_id=eq.${sessionId}` }, (payload) => {
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'sessions', filter: `id=eq.${sessionId}` }, loadOverlay)
+      .on('postgres_changes', { event: 'INSERT', schema: 'interact', table: 'messages', filter: `session_id=eq.${sessionId}` }, (payload) => {
         mergeMessages([payload.new as Message])
       })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'caption_segments', filter: `session_id=eq.${sessionId}` }, (payload) => {
+      .on('postgres_changes', { event: 'INSERT', schema: 'interact', table: 'caption_segments', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const segment = payload.new as CaptionSegment
         showCaption(segment.language, segment.text)
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'session_events', filter: `session_id=eq.${sessionId}` }, (payload) => {
+      .on('postgres_changes', { event: '*', schema: 'interact', table: 'session_events', filter: `session_id=eq.${sessionId}` }, (payload) => {
         const event = payload.new as SessionEvent
         showActivityEvent(event)
       })
@@ -168,9 +186,15 @@ export function DesktopOverlayPage() {
   }, [])
 
   useEffect(() => {
+    // A live round now stays clickable to the end, not just while it is waiting
+    // to start. The presenter used to have nothing to press once it was running,
+    // so the window was made click-through — but that is exactly when the close
+    // button is needed, and it would have been clicked straight through. The
+    // overlay is opaque for the whole round, so nothing behind it is reachable
+    // either way.
     const interactive = Boolean(
       (lotteryEvent && lotteryEvent.payload.finalized === false)
-      || (isBuzzerPending(buzzerEvent) && !isBuzzerAccepting(buzzerEvent)),
+      || isBuzzerPending(buzzerEvent),
     )
     void window.interactDesktop?.setLotteryInteraction(interactive)
     return () => {
@@ -214,6 +238,18 @@ export function DesktopOverlayPage() {
     await window.interactDesktop?.showLottery(nextEvent)
   }
 
+  async function cancelBuzzer() {
+    const presenterToken = getPresenterToken(sessionId)
+    if (!presenterToken) throw new Error('找不到講者操作權限。')
+    const { error } = await requireSupabase().functions.invoke('presenter-action', {
+      body: { action: 'cancel_buzzer', sessionId, presenterToken },
+    })
+    if (error) throw error
+    // Closed here and now rather than waiting for the change to come back round
+    // through realtime: the presenter pressed it, so it should go.
+    setBuzzerEvent(null)
+  }
+
   if (!session) return null
   return (
     <div className="desktop-overlay-root">
@@ -228,7 +264,7 @@ export function DesktopOverlayPage() {
         />
       )}
       <LotteryOverlay event={lotteryEvent} onSelect={selectLotteryCandidate} />
-      <BuzzerOverlay event={buzzerEvent} onStart={activateBuzzer} />
+      <BuzzerOverlay event={buzzerEvent} onClose={cancelBuzzer} onStart={activateBuzzer} />
     </div>
   )
 }

@@ -33,24 +33,91 @@ type GeminiRequestOptions = {
   fallbackTimeoutMs?: number
 }
 
+type GeminiPart = { text?: string; inlineData?: { mimeType?: string; data?: string } }
+type GeminiPayload = {
+  systemInstruction?: { parts?: GeminiPart[] }
+  contents?: Array<{ role?: string; parts?: GeminiPart[] }>
+  generationConfig?: { responseFormat?: { text?: { schema?: Record<string, unknown> } } }
+}
+
+// The classroom's OpenRouter key is a second billing and API route, not a
+// client-side setting. The submitted speech answers are WAV; live captions
+// use a separate websocket and are outside this request/response fallback.
+function openRouterRequest(body: string, profile: AiProfile) {
+  const payload = JSON.parse(body) as GeminiPayload
+  const system = payload.systemInstruction?.parts?.map((part) => part.text || '').join('\n') || ''
+  const messages: Array<Record<string, unknown>> = []
+  if (system) messages.push({ role: 'system', content: system })
+  for (const entry of payload.contents || []) {
+    const content: Array<Record<string, unknown>> = []
+    for (const part of entry.parts || []) {
+      if (typeof part.text === 'string') content.push({ type: 'text', text: part.text })
+      else if (part.inlineData?.mimeType?.startsWith('image/') && part.inlineData.data) {
+        content.push({ type: 'image_url', image_url: { url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}` } })
+      } else if (part.inlineData?.mimeType === 'audio/wav' && part.inlineData.data) {
+        content.push({ type: 'input_audio', input_audio: { data: part.inlineData.data, format: 'wav' } })
+      } else return null
+    }
+    if (content.length) messages.push({ role: entry.role === 'model' ? 'assistant' : 'user', content })
+  }
+  if (!messages.some((message) => message.role === 'user')) return null
+  const schema = payload.generationConfig?.responseFormat?.text?.schema
+  return {
+    model: Deno.env.get('INTERACT_OPENROUTER_MODEL') || 'google/gemini-3.8-flash',
+    messages,
+    max_tokens: profile === 'deep' ? 8192 : 4096,
+    provider: { require_parameters: true },
+    response_format: schema
+      ? { type: 'json_schema', json_schema: { name: 'interact_response', strict: true, schema } }
+      : { type: 'json_object' },
+  }
+}
+
+async function requestOpenRouter(body: string, profile: AiProfile, timeoutMs: number) {
+  const key = Deno.env.get('INTERACT_OPENROUTER_API_KEY')
+  if (!key) throw new Error('OpenRouter is not configured.')
+  const request = openRouterRequest(body, profile)
+  if (!request) throw new Error('OpenRouter fallback does not support this input type.')
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!response.ok) {
+    await response.body?.cancel()
+    throw new Error(`OpenRouter HTTP ${response.status}.`)
+  }
+  const result = await response.json()
+  const raw = result.choices?.[0]?.message?.content
+  if (typeof raw !== 'string' || !raw.trim()) throw new Error('OpenRouter returned no content.')
+  const clean = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+  const output = JSON.parse(clean)
+  console.info('interact_openrouter_fallback', { model: result.model || request.model, requestId: result.id || null })
+  return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(output) }] } }] }), {
+    headers: { 'Content-Type': 'application/json', 'x-interact-ai-route': 'openrouter' },
+  })
+}
+
 function retryableStatus(status: number) {
   // 404 means this key cannot reach that model, which is exactly what the fallback is for.
   return status === 404 || status === 408 || status === 429 || status >= 500
 }
 
 export function geminiModels(profile: AiProfile) {
+  // Old endpoint aliases now redirect; call their replacements directly even
+  // when an existing deployment still has the old names in its secrets.
+  const currentModel = (model: string) => model === 'gemini-3.7-flash'
+    ? 'gemini-3.8-flash'
+    : model === 'gemini-3.5-flash' ? 'gemini-3.6-flash' : model
   if (profile === 'deep') {
-    const primary = Deno.env.get('GEMINI_DEEP_MODEL') || Deno.env.get('GEMINI_MODEL') || 'gemini-3.7-flash'
-    const fallback = Deno.env.get('GEMINI_DEEP_FALLBACK_MODEL') || Deno.env.get('GEMINI_FALLBACK_MODEL') || 'gemini-3.6-flash'
+    const primary = currentModel(Deno.env.get('GEMINI_DEEP_MODEL') || Deno.env.get('GEMINI_MODEL') || 'gemini-3.8-flash')
+    const fallback = currentModel(Deno.env.get('GEMINI_DEEP_FALLBACK_MODEL') || Deno.env.get('GEMINI_FALLBACK_MODEL') || 'gemini-3.6-flash')
     return fallback === primary ? [primary] : [primary, fallback]
   }
 
-  // Measured on the question-translation call at LOW thinking, two independent
-  // samples: 3.7 answered in 1.1-1.3 s, 3.6 in 1.7-1.9 s, and 3.8 averaged
-  // similarly to 3.7 but spiked to 5.4 s. Newer turned out to be faster here, so
-  // this profile no longer sits a version behind the deep one for latency.
-  const primary = Deno.env.get('GEMINI_REALTIME_MODEL') || 'gemini-3.7-flash'
-  const fallback = Deno.env.get('GEMINI_REALTIME_FALLBACK_MODEL') || 'gemini-3.6-flash'
+  const primary = currentModel(Deno.env.get('GEMINI_REALTIME_MODEL') || 'gemini-3.8-flash')
+  const fallback = currentModel(Deno.env.get('GEMINI_REALTIME_FALLBACK_MODEL') || 'gemini-3.6-flash')
   return fallback === primary ? [primary] : [primary, fallback]
 }
 
@@ -66,7 +133,9 @@ export async function requestGemini(
   const apiKey = Deno.env.get('GEMINI_API_KEY')
   if (!apiKey) throw new Error('GEMINI_API_KEY is not configured.')
 
-  const models = geminiModels(profile)
+  const openRouterKey = Deno.env.get('INTERACT_OPENROUTER_API_KEY')
+  const openRouterSupported = Boolean(openRouterKey && openRouterRequest(body, profile))
+  const models = openRouterSupported ? geminiModels(profile).slice(0, 1) : geminiModels(profile)
   const primaryTimeoutMs = options.primaryTimeoutMs ?? (profile === 'deep' ? 90_000 : 12_000)
   const fallbackTimeoutMs = options.fallbackTimeoutMs ?? (profile === 'deep' ? 60_000 : 18_000)
   let failureMessage = 'AI request failed.'
@@ -100,6 +169,14 @@ export async function requestGemini(
     if (index < models.length - 1) console.warn(`Gemini unavailable on ${model}; switching to ${models[index + 1]}.`)
   }
 
+  if (openRouterSupported) {
+    try {
+      return await requestOpenRouter(body, profile, profile === 'deep' ? 60_000 : Math.max(20_000, fallbackTimeoutMs))
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'OpenRouter request failed.'
+      throw new Error(`Gemini and OpenRouter unavailable: ${detail}`)
+    }
+  }
   throw new Error(failureMessage)
 }
 

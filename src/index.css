@@ -665,10 +665,17 @@ h2 {
   justify-content: space-between;
 }
 
+.qr-panel .panel-heading {
+  gap: 8px;
+}
+
 .qr-panel .panel-heading h2 {
   align-items: center;
   display: flex;
-  gap: 7px;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .desktop-shell .qr-panel .panel-heading {
@@ -689,11 +696,19 @@ h2 {
   white-space: nowrap;
 }
 
+/* The collapsed window is 194px wide (CONTROL_COLLAPSED in electron/main.cjs),
+   leaving the heading 166px — and the icon, 加入場次 and two 32px buttons want
+   180. Nothing in the row was allowed to shrink, so it overflowed to the right
+   and the buttons spilled out of the card. Letting the title give way keeps them
+   inside; the small inset then holds them clear of the 16px corner. */
 .qr-window-actions {
   -webkit-app-region: no-drag;
   align-items: center;
   display: flex;
+  flex: 0 0 auto;
   gap: 2px;
+  margin-right: 2px;
+  margin-top: 2px;
 }
 
 .qr-window-actions button {
@@ -706,7 +721,7 @@ h2 {
   justify-content: center;
   min-height: 30px;
   padding: 0;
-  width: 32px;
+  width: 28px;
 }
 
 .qr-window-actions button:hover {
@@ -759,7 +774,7 @@ h2 {
 }
 
 .desktop-shell .join-url {
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.2;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1223,6 +1238,40 @@ h2 {
   border-color: rgb(199 139 32 / 35%);
 }
 
+/* Shown to the class while nobody is at the front of the room. It is a notice
+   rather than a takeover of the page: the lesson so far, the answers already
+   given and any file the teacher shared all stay where the student left them,
+   and the notice simply goes away by itself when the teacher comes back. */
+.participant-break {
+  align-items: center;
+  background: var(--energy-soft);
+  border-color: var(--energy);
+  display: flex;
+  gap: 14px;
+}
+
+.participant-break-icon {
+  align-items: center;
+  background: var(--energy-dark);
+  border-radius: 50%;
+  color: #fff;
+  display: flex;
+  flex: 0 0 auto;
+  height: 46px;
+  justify-content: center;
+  width: 46px;
+}
+
+.participant-break h2 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.participant-break p {
+  color: var(--muted);
+  margin: 4px 0 0;
+}
+
 .danmaku-layer {
   inset: 0;
   overflow: hidden;
@@ -1249,6 +1298,16 @@ h2 {
   text-overflow: clip;
   white-space: nowrap;
   width: max-content;
+}
+
+/* The hidden item the scheduler measures against. It has to be a real
+   .danmaku-item to carry the same font and padding, so it is taken out of the
+   flow and stopped from animating instead of being styled differently. */
+.danmaku-measure {
+  animation: none;
+  left: 0;
+  top: 0;
+  visibility: hidden;
 }
 
 @keyframes danmaku-move {
@@ -1371,7 +1430,11 @@ h2 {
 }
 
 .modal-backdrop {
-  align-items: center;
+  /* Not center: a centred flex child taller than its scrolling parent has its
+     top pushed above the scroll origin, where nothing can reach it — the dialog
+     opens with its first rows already cut off. The modal auto-margins itself
+     instead, which centres it while it fits and gives way once it does not. */
+  align-items: flex-start;
   background: rgb(24 34 58 / 62%);
   display: flex;
   inset: 0;
@@ -1391,6 +1454,7 @@ h2 {
   box-shadow: 0 24px 72px rgb(24 34 58 / 25%);
   display: grid;
   gap: 14px;
+  margin: auto;
   max-width: 520px;
   padding: 20px;
   width: 100%;
@@ -1577,6 +1641,7 @@ h2 {
 .type-grid .send-screen-type {
   grid-column: auto;
 }
+
 
 .selected-type {
   background: var(--primary);
@@ -2262,12 +2327,74 @@ h2 {
 }
 
 .participant-header {
+  align-items: center;
   background: var(--surface);
   border: 1px solid var(--border);
   border-left: 5px solid var(--primary);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
   padding: 16px 18px;
+}
+
+.participant-header-side {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+
+/* A raised hand has to be obvious across a classroom on the student's own
+   screen as well as on the teacher's, so it changes colour rather than
+   only its label. */
+.participant-hand {
+  align-items: center;
+  background: var(--surface-muted, #eef1f6);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 16px;
+}
+
+.participant-hand.is-raised {
+  background: #ffb020;
+  border-color: #ffb020;
+  color: #23262f;
+}
+
+/* The same figures as the teacher's list, read the same way round: the score
+   first because it is the one that moves, then where it places. */
+.participant-standing {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 14px;
+  gap: 8px;
+}
+
+.participant-score {
+  background: #e8492f;
+  border-radius: 999px;
+  color: #fff;
+  font-weight: 600;
+  padding: 3px 10px;
+}
+
+.participant-rank {
+  color: var(--text-muted, #687386);
+  font-variant-numeric: tabular-nums;
+}
+
+.participant-badges {
+  display: flex;
+  gap: 2px;
 }
 
 .participant-header h1 {
@@ -3256,6 +3383,34 @@ h2 {
   z-index: 210;
 }
 
+/* Keep this away from native window controls in either macOS corner. */
+.buzzer-close {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.12);
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  height: 46px;
+  justify-content: center;
+  left: 50%;
+  position: absolute;
+  top: 20px;
+  transform: translateX(-50%);
+  width: 46px;
+  z-index: 3;
+}
+
+.buzzer-close:hover,
+.buzzer-close:active {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.presenter-action-error {
+  margin: 12px 16px 0;
+}
+
 .buzzer-content {
   align-items: center;
   display: flex;
@@ -3384,8 +3539,8 @@ h2 {
 .word-cloud-page {
   background: var(--surface-strong);
   color: #f7f8fc;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   height: 100vh;
   overflow: hidden;
   padding: 58px 34px 26px;
@@ -3420,11 +3575,14 @@ h2 {
   font-size: 26px;
 }
 
+/* One row. As a grid these stacked, and every extra control pushed the cloud
+   further down the screen. */
 .word-cloud-tools {
-  align-items: flex-end;
-  display: grid;
-  gap: 8px;
-  justify-items: end;
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
 }
 
 .segmented-control {
@@ -3450,6 +3608,9 @@ h2 {
 }
 
 .word-cloud-canvas {
+  /* Takes the space the blocks above it did not, and min-height: 0 is what lets
+     it actually shrink rather than pushing the page past the viewport. */
+  flex: 1 1 auto;
   min-height: 0;
   overflow: hidden;
   position: relative;
@@ -3755,10 +3916,14 @@ h2 {
     min-width: 48px;
   }
 
+  /* A touch display enlarges these, and the collapsed window is only 194px wide:
+     at 36px the icon, the title and two buttons together want more room than the
+     heading has, the row overflows, and the buttons slide out past the card. 32
+     is still a fair target and leaves the row eight pixels to spare. */
   .desktop-shell .qr-window-actions button {
-    min-height: 36px;
-    min-width: 36px;
-    width: 36px;
+    min-height: 32px;
+    min-width: 32px;
+    width: 32px;
   }
 
   .analysis-content summary {
@@ -3964,9 +4129,6 @@ h2 {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-}
-
-.file-list-meta strong {
   overflow-wrap: anywhere;
 }
 
@@ -3984,8 +4146,11 @@ h2 {
   gap: 10px;
 }
 
+/* A real basis, so when the buttons no longer fit beside the name the row
+   wraps and gives them their own line — rather than the name shrinking until
+   it reads one character tall. */
 .file-response-row .file-list-meta {
-  flex: 1;
+  flex: 1 1 180px;
 }
 
 .file-response-row .file-list-actions {
@@ -4511,7 +4676,10 @@ h2 {
   text-align: right;
 }
 
-.roster-call {
+/* Two small buttons where the call button used to be. 380px is the whole
+   window, so they only carry an icon and lean on their titles. */
+.roster-award,
+.roster-remove {
   background: none;
   border: 0;
   border-radius: 6px;
@@ -4522,14 +4690,76 @@ h2 {
   padding: 4px;
 }
 
-.roster-call:hover:not(:disabled) {
-  background: var(--primary, #1463ff);
+.roster-award:hover:not(:disabled) {
+  background: #12b76a;
   color: #fff;
 }
 
-.roster-call:disabled {
+.roster-remove:hover:not(:disabled) {
+  background: #e5544b;
+  color: #fff;
+}
+
+.roster-award:disabled,
+.roster-remove:disabled {
   cursor: default;
   opacity: 0.3;
+}
+
+/* The teacher's own points, kept apart from the participation score beside it:
+   that one is arithmetic over what the class did, this one is a judgement. */
+.roster-bonus {
+  background: color-mix(in srgb, #12b76a 14%, transparent);
+  border: 0;
+  border-radius: 999px;
+  color: #087443;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  padding: 2px 7px;
+}
+
+.roster-bonus:hover:not(:disabled) {
+  background: color-mix(in srgb, #e5544b 16%, transparent);
+  color: #a3271f;
+}
+
+/* Present on the class list. The one thing a teacher taking attendance is
+   scanning for, so it reads at a glance rather than as another grey tag. */
+.roster-present {
+  color: #12b76a;
+  flex: 0 0 auto;
+}
+
+/* On the list, never turned up. Grey all through rather than struck out: they
+   may still walk in. */
+.roster-row.is-absent {
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+.roster-tag.is-absent {
+  background: var(--surface-muted, #eef0f5);
+  color: var(--muted);
+}
+
+.roster-tag.is-unlisted {
+  background: #eef2ff;
+  color: #3538cd;
+}
+
+.roster-tag.is-quiet {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  padding: 2px 0;
+}
+
+.roster-heading-actions {
+  align-items: center;
+  display: flex;
+  gap: 2px;
 }
 
 .roster-dot {
@@ -4542,6 +4772,43 @@ h2 {
 
 .roster-dot.is-online {
   background: #12b76a;
+}
+
+/* Takes the dot's place on a line where a hand is up, and is also the control
+   that puts it down again — so the thing the presenter is looking at is the
+   thing they press. */
+/* The same rounded box the student pressed to put the hand up, so the two ends
+   of the gesture look like one thing. */
+.roster-hand {
+  align-items: center;
+  background: #ffb020;
+  border: 0;
+  border-radius: 999px;
+  color: #23262f;
+  cursor: pointer;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  height: 26px;
+  justify-content: center;
+  margin: -9px 0 -9px -9px;
+  padding: 0 9px;
+}
+
+/* The same hand, counting them, where the class is summarised. */
+.roster-hand.is-clear {
+  border-radius: 999px;
+  font-weight: 600;
+  gap: 4px;
+  height: 28px;
+  margin: 0;
+  padding: 0 10px;
+  width: auto;
+}
+
+.roster-hand:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .roster-empty {
@@ -4605,6 +4872,41 @@ h2 {
   margin-top: 10px;
 }
 
+/* The results panel is a narrow column beside the class list, so a marked
+   submission is laid out to survive it: the page thumbnail and who wrote it on
+   one line, the verdict under the name, and the buttons on their own line once
+   they stop fitting. */
+.upload-answer-list .file-response-row {
+  align-items: flex-start;
+  column-gap: 12px;
+  row-gap: 10px;
+}
+
+.upload-answer-list .file-list-meta {
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.upload-answer-list .file-list-meta strong {
+  font-size: 0.95rem;
+  line-height: 1.35;
+}
+
+.upload-answer-list .file-list-meta .muted {
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+/* Right-aligned so that on the line of their own they sit under the buttons
+   they replaced rather than drifting back under the thumbnail. */
+.upload-answer-list .file-list-actions {
+  margin-left: auto;
+}
+
+.upload-answer-list .file-list-actions > * {
+  white-space: nowrap;
+}
+
 .question-type-hint {
   font-size: 0.82rem;
   line-height: 1.6;
@@ -4630,6 +4932,122 @@ h2 {
 .upload-answer-list .file-response-thumb:not(.is-placeholder) {
   background: var(--surface);
   border: 1px solid var(--border);
+}
+
+/* The thumbnail is the way into the full page, so it has to read as a control
+   rather than as a decoration sitting next to the name. */
+.file-response-thumb-button {
+  background: none;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  flex: none;
+  padding: 0;
+  position: relative;
+}
+
+.file-response-thumb-button > svg {
+  background: rgb(24 34 58 / 72%);
+  border-radius: 6px;
+  bottom: 3px;
+  color: #fff;
+  opacity: 0;
+  padding: 2px;
+  position: absolute;
+  right: 3px;
+  transition: opacity 120ms ease;
+}
+
+.file-response-thumb-button:hover > svg,
+.file-response-thumb-button:focus-visible > svg {
+  opacity: 1;
+}
+
+/* Reading a class of handwritten answers means looking at each one properly,
+   so the page fills the window and the arrows walk the class. */
+.submission-viewer {
+  align-items: center;
+  background: rgb(14 20 36 / 88%);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 20px;
+  position: fixed;
+  z-index: 40;
+}
+
+.submission-viewer-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* min-height:0 on both this and the stage below is what stops a tall page
+     pushing its own bottom off the screen: without it a flex child keeps its
+     content height and max-height on the image has nothing to measure against. */
+  max-height: 100%;
+  max-width: 100%;
+  min-height: 0;
+}
+
+.submission-viewer-inner > header {
+  align-items: center;
+  color: #fff;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.submission-viewer-inner > header .muted {
+  color: rgb(255 255 255 / 70%);
+  margin-left: auto;
+}
+
+.submission-viewer-inner > header .ghost-button {
+  background: rgb(255 255 255 / 12%);
+  border-color: rgb(255 255 255 / 28%);
+  color: #fff;
+}
+
+.submission-viewer-stage {
+  align-items: center;
+  display: flex;
+  flex: 1 1 auto;
+  gap: 10px;
+  justify-content: center;
+  min-height: 0;
+}
+
+/* svh rather than a percentage: a percentage max-height resolves against the
+   stage, whose own height comes from this image, so it is ignored and a tall
+   page runs off the bottom of the window. The window is the one height here
+   that is definite. 120px is the header, the gaps and the backdrop padding. */
+.submission-viewer-stage img {
+  background: #fff;
+  border-radius: 10px;
+  max-height: calc(100svh - 120px);
+  max-width: 100%;
+  min-height: 0;
+  min-width: 0;
+  object-fit: contain;
+}
+
+.submission-viewer-stage .ghost-button {
+  background: rgb(255 255 255 / 12%);
+  border-color: rgb(255 255 255 / 28%);
+  color: #fff;
+  flex: none;
+}
+
+/* 電寫題: the canvas is the answer sheet, so it gets the width the panel has
+   rather than sitting inside the narrower prose column. */
+.participant-drawing-answer .board-drawing {
+  margin-top: 10px;
+}
+
+.participant-drawing-submitted {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin: 10px 0;
+  width: 100%;
 }
 
 /* The teacher's answer clock, set as chips because this gets chosen mid-class
@@ -4715,12 +5133,15 @@ h2 {
   gap: 8px;
 }
 
+/* Square, because there is no label beside the icon any more. */
 .question-stop-button {
+  align-items: center;
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text);
-  font-size: 0.82rem;
-  padding: 5px 12px;
+  display: inline-flex;
+  justify-content: center;
+  padding: 7px;
 }
 
 .question-stop-button:hover {
@@ -4783,3 +5204,2192 @@ h2 {
 .participant-mark-waiting {
   margin-top: 12px;
 }
+
+/* 圖上點選: the picture is the answer sheet, so it fills the width and the pins
+   are positioned as percentages — the class answers on phones and the presenter
+   reads it on a projector, and a pixel means nothing across those two. */
+.hotspot-frame {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: block;
+  line-height: 0;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+}
+
+.hotspot-frame.is-answerable {
+  cursor: crosshair;
+}
+
+.hotspot-image {
+  display: block;
+  width: 100%;
+}
+
+/* A round head with a point below it, both upright.
+   It used to be a square with one sharp corner, rotated -45deg to bring that
+   corner downwards — but rotation happens about the element's centre, so it
+   carried the corner 5.4px past the spot the student actually tapped. Every
+   mark in every class was low by that much, and on a diagram where the answer
+   is a millimetre wide that is the difference between right and wrong.
+
+   The element is the whole pin, head and point together, so its bottom edge IS
+   the point. translate(-50%, -100%) puts that edge on the tap and there is no
+   offset to get wrong — an earlier attempt kept the element as just the head and
+   subtracted the point's height, which left the tip two pixels low because the
+   border and the padding box do not agree about where 100% starts. */
+.hotspot-pin {
+  background: none;
+  border: 0;
+  height: 35px;
+  min-height: 0;
+  padding: 0;
+  position: absolute;
+  transform: translate(-50%, -100%);
+  transform-origin: 50% 100%;
+  width: 26px;
+}
+
+/* The head. */
+.hotspot-pin > span {
+  align-items: center;
+  background: var(--pin-color, var(--primary, #5b5ce2));
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 35%);
+  color: #fff;
+  display: flex;
+  font-size: 12px;
+  font-weight: 700;
+  height: 26px;
+  justify-content: center;
+  line-height: 1;
+  /* Translucent, so that a crowd on one spot reads as a crowd: pins stacked
+     three deep are visibly darker than one. This used to muddy everything into
+     a single violet because every pin was the same colour; with a colour per
+     student the overlap now says how many, not just that there were some. */
+  opacity: 0.82;
+  width: 26px;
+}
+
+/* The point, ending exactly on the element's bottom edge. */
+.hotspot-pin::after {
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 10px solid var(--pin-color, var(--primary, #5b5ce2));
+  bottom: 0;
+  content: '';
+  left: 50%;
+  opacity: 0.82;
+  position: absolute;
+  transform: translateX(-50%);
+}
+
+/* The student's own marks on their own phone, where every pin belongs to them
+   and a colour per student would say nothing. */
+.hotspot-pin.is-own > span {
+  background: var(--danger, #c62828);
+}
+
+.hotspot-pin.is-own::after {
+  border-top-color: var(--danger, #c62828);
+}
+
+/* The global button:active rule sets transform: translateY(1px), and it beats
+   .hotspot-pin on specificity — so pressing a pin REPLACED the transform that
+   positions it. The pin slid out from under the finger (animated, because
+   transform is transitioned), the release landed on the picture instead, and no
+   click ever reached the handler: the mark could not be taken back. Press
+   feedback has to compose with the positioning, not replace it. */
+.hotspot-pin:active {
+  transform: translate(-50%, -100%) scale(0.9);
+}
+
+.hotspot-frame.is-answerable .hotspot-pin {
+  cursor: pointer;
+}
+
+.participant-hotspot-actions {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-top: 12px;
+}
+
+.hotspot-results-panel .hotspot-frame {
+  margin-top: 10px;
+}
+
+/* 兩輪對照: the migration is the finding, so it gets its own panel rather than
+   a line under the bars. */
+.round-comparison h2 {
+  font-size: 1rem;
+  margin: 0 0 10px;
+}
+
+.round-summary {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  margin-bottom: 10px;
+}
+
+.round-summary > div {
+  background: var(--surface-subtle);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+}
+
+.round-summary span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.round-moves {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.round-moves li {
+  display: flex;
+  font-size: 0.86rem;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.question-stop-button.is-repeat {
+  background: var(--primary-soft);
+  border-color: rgb(91 92 226 / 30%);
+}
+/* 排序題 / 配對題: answered by tapping and by picking from a select, never by
+   dragging. A drag is the natural gesture on a desktop and the one gesture a
+   phone gets consistently wrong, and this is answered on phones. */
+/* Always the width of a two-digit number, so placing an item does not shunt its
+   text sideways. */
+.matching-prompt {
+  flex: 1 1 auto;
+  font-size: 0.95rem;
+}
+
+.ordering-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.ordering-actions .muted {
+  margin-right: auto;
+}
+
+.ordering-subheading {
+  font-size: 0.9rem;
+  margin: 16px 0 0;
+}
+
+.ordering-consensus {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-left: 22px;
+}
+
+.ordering-consensus li {
+  font-size: 0.9rem;
+}
+
+.ordering-consensus.is-key li::marker {
+  color: var(--primary, #5b5ce2);
+  font-weight: 700;
+}
+
+.ordering-mistakes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.ordering-mistakes li {
+  display: flex;
+  font-size: 0.84rem;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.ordering-mistakes b {
+  white-space: nowrap;
+}
+
+.ordering-key-editor {
+  border-top: 1px solid var(--border);
+  margin-top: 16px;
+  padding-top: 12px;
+}
+
+.ordering-key-set {
+  margin-top: 14px;
+}
+
+.matching-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.matching-breakdown-head {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.matching-breakdown b.is-good {
+  color: var(--success, #2e7d32);
+}
+
+.matching-breakdown b.is-weak {
+  color: var(--danger, #c62828);
+}
+
+.matching-breakdown p {
+  font-size: 0.8rem;
+  margin: 4px 0 0;
+}
+
+/* 排序題 / 配對題 的派題區: what the AI proposed, before it is dispatched. The
+   teacher reads it, reorders it, throws out what does not belong, and only then
+   sends it — so it has to be legible as a list, not as a row of controls. */
+.generated-items {
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+}
+
+.generated-items-heading {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.generated-item-list,
+.generated-pair-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+
+.generated-item-list {
+  /* Numbered, because for an ordering question the number is the answer. */
+  counter-reset: generated-item;
+  list-style: none;
+}
+
+.generated-item-list li,
+.generated-pair-list li {
+  align-items: center;
+  background: var(--surface-subtle);
+  border-radius: var(--radius-md);
+  display: flex;
+  font-size: 0.88rem;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.generated-item-list li::before {
+  counter-increment: generated-item;
+  content: counter(generated-item);
+  color: var(--muted);
+  flex: 0 0 20px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.generated-item-list li > span:first-of-type,
+.generated-pair-list li > span:first-of-type {
+  flex: 1 1 auto;
+}
+
+.generated-item-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+/* A grid rather than flex, so every arrow lands in the same column and the
+   pairs read down the page as pairs. */
+.generated-pair-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+}
+
+.generated-pair-arrow {
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+/* 依權重排出來的全班順序: the answer the class gave, already worked out. The
+   weight sits on the right so the list reads as a list first and a measurement
+   second. */
+.ordering-ranked {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-left: 22px;
+}
+
+.ordering-ranked li {
+  align-items: baseline;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.ordering-ranked-item {
+  font-size: 0.9rem;
+}
+
+/* The key editor pairs by tapping, so each prompt owns a row of its choices
+   rather than a dropdown. Wraps, because six answers do not fit on one line. */
+/* 圖上點選放大檢視. The picture is the whole result, so the enlarged view is the
+   picture and nothing else — it fills the window and the pins scale with it. */
+.hotspot-heading-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The thumbnail is a button so the whole picture is the target, not just the
+   small icon in the heading. */
+.hotspot-thumb-button {
+  background: none;
+  border: 0;
+  cursor: zoom-in;
+  display: block;
+  padding: 0;
+  width: 100%;
+}
+
+.hotspot-review-modal {
+  background: var(--surface);
+  border: 1px solid rgb(255 255 255 / 65%);
+  border-radius: 22px;
+  box-shadow: 0 28px 90px rgb(24 34 58 / 35%);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 88vh;
+  overflow: hidden;
+  width: 88vw;
+}
+
+.hotspot-review-modal > header {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  padding: 16px 20px;
+}
+
+.hotspot-review-modal > header h2 {
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+/* Centres the image and caps it at the space available, so a tall screenshot
+   is bounded by the height and a wide one by the width. */
+.hotspot-review-stage {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+}
+
+/* Both bounds, not just the height. These rules replace the base width: 100%
+   with width: auto so a tall screenshot is not stretched — but with only a
+   max-height, a wide one kept its natural width, overflowed the centred flex
+   line, and lost its right edge off the side of the window. The panel behind it
+   showed the same picture correctly, which made it look like the enlarged view
+   was cropping on purpose.
+   min-width: 0 because a flex item will not shrink below its content otherwise,
+   and the content here is an image that wants to be 2560px wide. */
+.hotspot-review-stage .hotspot-frame {
+  max-height: 100%;
+  max-width: 100%;
+  min-width: 0;
+  width: auto;
+}
+
+/* No object-fit: with both axes capped and neither dimension forced, the aspect
+   ratio is already preserved and object-fit would never engage. Leaving it in
+   read as if it were what did the fitting.
+   The height cap is the modal minus its header and padding rather than a round
+   number of vh: 78vh was a few pixels taller than the space it had to fit in, so
+   a tall screenshot was clipped along the bottom by the frame's overflow. */
+.hotspot-review-stage .hotspot-image {
+  max-height: calc(88vh - 116px);
+  max-width: 100%;
+  width: auto;
+}
+
+/* The standalone desktop window: same stage, but it is the whole window. */
+.hotspot-review-window {
+  background: var(--surface);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+}
+
+.hotspot-review-window > header {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  padding: 14px 20px;
+  -webkit-app-region: drag;
+}
+
+.hotspot-review-window > header h1 {
+  font-size: 1.1rem;
+  margin: 0;
+}
+
+.hotspot-review-window > header .show-answers-toggle,
+.hotspot-review-window > header .icon-button {
+  -webkit-app-region: no-drag;
+}
+
+.hotspot-review-window > .muted,
+.hotspot-review-window > .error {
+  margin: 10px 20px 0;
+}
+
+/* The standalone window is the full viewport and carries a second line above the
+   picture, so it subtracts more than the modal does. */
+.hotspot-review-window .hotspot-review-stage .hotspot-image {
+  max-height: calc(100vh - 160px);
+}
+/* 排序題 in its own window. The panel caps the tiles hard because it also has
+   to hold the question, the rate, the key editor and every submission in a
+   column a few hundred pixels wide; here the same tiles get the width to be
+   read, which is the only way to tell whether the class put them in order. */
+.ordering-review-window {
+  background: var(--surface);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+}
+
+.ordering-review-window > header {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  padding: 14px 20px;
+  -webkit-app-region: drag;
+}
+
+.ordering-review-window > header h1 {
+  font-size: 1.1rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ordering-review-window > header .show-answers-toggle,
+.ordering-review-window > header .icon-button {
+  -webkit-app-region: no-drag;
+}
+
+.ordering-review-window > .error {
+  margin: 16px 20px 0;
+}
+
+.ordering-review-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 24px 28px;
+}
+
+/* The whole point of the window. A slice of a screen capture is wide and
+   short, so height is what it needs; 260px shows a line of a textbook at a
+   size a teacher can read across the room. */
+.ordering-review-body .ordering-tiles img {
+  max-height: 260px;
+}
+
+.ordering-review-body .ordering-ranked-image {
+  max-height: 200px;
+}
+
+/* Deliberately one column. Two would halve the width every tile gets, and
+   width is the whole reason to open this window. A long scroll is the right
+   trade for being able to read what the pieces say. */
+
+/* 電寫題 / 上傳作答 in its own window: the page big enough to read the
+   handwriting, the marking beside it, and every submission along the bottom so
+   a class of thirty is not thirty presses of an arrow away. */
+.submission-review-window {
+  background: var(--surface);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.submission-review-window > header {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  padding: 14px 20px;
+  -webkit-app-region: drag;
+}
+
+.submission-review-window > header h1 {
+  font-size: 1.1rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.submission-review-window > header .show-answers-toggle,
+.submission-review-window > header .icon-button {
+  -webkit-app-region: no-drag;
+}
+
+.submission-review-window > .muted,
+.submission-review-window > .error {
+  margin: 16px 20px 0;
+}
+
+.submission-review-body {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
+  min-height: 0;
+  padding: 16px 20px;
+}
+
+.submission-review-stage {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  min-height: 0;
+  min-width: 0;
+}
+
+.submission-review-stage img {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  max-height: 100%;
+  max-width: 100%;
+  min-height: 0;
+  min-width: 0;
+  object-fit: contain;
+}
+
+.submission-review-stage .icon-button {
+  flex: none;
+}
+
+/* A submission the window cannot draw still gets its turn in the sequence:
+   leaving it out would silently drop a student from a class the presenter is
+   reading through. */
+.submission-review-file {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 36px 28px;
+  text-align: center;
+  text-decoration: none;
+}
+
+.submission-review-file svg {
+  color: var(--muted);
+}
+
+.submission-review-file strong {
+  overflow-wrap: anywhere;
+}
+
+.submission-review-chip-file {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  display: flex;
+  height: 54px;
+  justify-content: center;
+  width: 72px;
+}
+
+.submission-review-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.submission-review-side h2 {
+  font-size: 0.85rem;
+  margin: 8px 0 0;
+}
+
+.submission-review-side p {
+  font-size: 0.88rem;
+  line-height: 1.65;
+  margin: 0;
+}
+
+.submission-review-side ul {
+  font-size: 0.85rem;
+  line-height: 1.6;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.submission-review-who {
+  align-items: baseline;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+.submission-review-who strong {
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.submission-review-count {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-left: auto;
+}
+
+.submission-review-verdict {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.submission-review-strip {
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 10px 20px;
+}
+
+.submission-review-chip {
+  background: none;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  flex: none;
+  padding: 0;
+}
+
+.submission-review-chip img {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: block;
+  height: 54px;
+  object-fit: contain;
+  object-position: top left;
+  width: 72px;
+}
+
+.submission-review-chip.is-current {
+  border-color: var(--primary);
+}
+
+/* 已上傳 N 人 on one side, 下載全部 on the other. */
+.upload-summary-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.upload-summary-row p {
+  margin: 0;
+}
+/* 拖曳排序 (SortableJS). One list serves 排序題 and 配對題 alike: ordering drags
+   the items themselves, matching keeps the prompts still on the left and drags
+   the answers beside them. */
+.sortable-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.sortable-row {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  cursor: grab;
+  display: flex;
+  font-size: 0.92rem;
+  gap: 10px;
+  padding: 11px 12px;
+  /* Otherwise a drag on touch scrolls the panel instead of moving the row. */
+  touch-action: none;
+  user-select: none;
+}
+
+.sortable-list.is-disabled .sortable-row {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.sortable-rank {
+  align-items: center;
+  background: var(--primary, #5b5ce2);
+  border-radius: 50%;
+  color: #fff;
+  display: flex;
+  flex: 0 0 24px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  height: 24px;
+  justify-content: center;
+}
+
+/* Matching only: the prompt this row is answering, which never moves. */
+.sortable-label {
+  flex: 1 1 45%;
+  font-weight: 600;
+  min-width: 0;
+}
+
+.sortable-value {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sortable-grip {
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+/* The gap the row came from, while it is in the air. */
+.sortable-ghost {
+  background: var(--surface-subtle);
+  opacity: 0.5;
+}
+
+.sortable-chosen {
+  border-color: var(--primary, #5b5ce2);
+}
+
+.sortable-drag {
+  box-shadow: 0 10px 26px rgb(24 34 58 / 28%);
+  cursor: grabbing;
+  opacity: 1;
+}
+/* A tile cut out of the screenshot. It keeps its own proportions and is capped
+   in height so six of them still fit on a phone without endless scrolling. */
+.sortable-image {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: block;
+  flex: 1 1 auto;
+  max-height: 110px;
+  min-width: 0;
+  object-fit: contain;
+  width: 100%;
+}
+/* 打亂的句子: laid out the way the sentence will read rather than as a stack.
+   The bank holds what is left, the line below holds the sentence so far. */
+.sentence-order {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.sentence-bank,
+.sentence-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  min-height: 54px;
+  padding: 10px;
+}
+
+.sentence-bank {
+  background: var(--surface-subtle);
+  border-radius: var(--radius-lg);
+}
+
+/* Dashed, so an empty line reads as somewhere to put things rather than as a
+   box that failed to load. */
+.sentence-line {
+  border: 1px dashed var(--border-strong, var(--border));
+  border-radius: var(--radius-lg);
+}
+
+.sentence-line.is-empty::before,
+.sentence-bank.is-empty::before {
+  color: var(--muted);
+  content: attr(data-hint);
+  font-size: 0.82rem;
+}
+
+.sentence-word {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: grab;
+  font-size: 0.95rem;
+  padding: 7px 14px;
+  touch-action: none;
+  user-select: none;
+}
+
+.sentence-word.is-placed {
+  background: color-mix(in srgb, var(--primary, #5b5ce2) 12%, var(--surface));
+  border-color: var(--primary, #5b5ce2);
+}
+
+/* The same pieces, read back rather than dragged: a submitted sentence, or the
+   class order on the presenter side. */
+.sentence-readout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.sentence-readout li {
+  background: var(--surface-subtle);
+  border-radius: 999px;
+  font-size: 0.84rem;
+  padding: 4px 10px;
+}
+.ordering-submissions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.ordering-submission-head {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.file-verdict.is-correct {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.file-verdict.is-wrong {
+  background: var(--danger-soft);
+  color: var(--danger-dark);
+}
+/* 配對題: the prompts are not in a draggable list at all, so they cannot be
+   picked up. Answers wait in the bank and are dropped onto the slot beside the
+   prompt they belong to. */
+.matching-board {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.matching-bank {
+  background: var(--surface-subtle);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  min-height: 52px;
+  padding: 10px;
+}
+
+.matching-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.matching-rows > li {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  padding: 8px 10px;
+}
+
+.matching-slot {
+  align-items: center;
+  border: 1px dashed var(--border-strong, var(--border));
+  border-radius: 999px;
+  display: flex;
+  list-style: none;
+  margin: 0;
+  min-height: 42px;
+  padding: 4px;
+}
+
+.matching-slot.is-filled {
+  border-style: solid;
+  border-color: transparent;
+}
+
+/* Tiles read back on the presenter side, in their order. */
+.ordering-tiles {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding-left: 22px;
+}
+
+.ordering-tiles img {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: block;
+  max-height: 90px;
+  object-fit: contain;
+  width: 100%;
+}
+/* A tile in the weighted ranking.
+//
+   It had no width of its own, so its size came from the aspect ratio against
+   max-height: a 1500x260 slice capped to 72 tall is 415 wide, which is wider
+   than the column it sits in — measured at 408px inside a 396px panel, running
+   off the right edge with the last words of every piece cut off. Every other
+   tile in this file sets width: 100%; this one was the exception.
+
+   It also stops sharing the row with the weight, which is what made it shrink
+   further the moment answers arrived. The weight goes underneath instead. */
+.ordering-ranked li.has-image {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ordering-ranked-image {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: block;
+  max-height: 120px;
+  min-width: 0;
+  object-fit: contain;
+  width: 100%;
+}
+/* Said in words rather than as a percentage: what a teacher would point at and
+   read out, with the exact count on hover for anyone who wants it. */
+.ordering-agreement {
+  border-radius: 999px;
+  flex: 0 0 auto;
+  font-size: 0.76rem;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+.ordering-agreement.is-firm {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.ordering-agreement.is-most {
+  background: var(--surface-subtle);
+  color: var(--muted);
+}
+
+.ordering-agreement.is-split {
+  background: var(--danger-soft);
+  color: var(--danger-dark);
+}
+/* 學員名單匯入與編輯. Opened from the roster window, which is 380px wide — the
+   dialog is deliberately wider than its parent and scrolls, because editing
+   sixty rows in a 380px column would be miserable. */
+.roster-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 92vh;
+  max-width: min(680px, 94vw);
+  overflow-y: auto;
+  width: min(680px, 94vw);
+}
+
+.roster-manager-head {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.roster-manager-head h2 {
+  flex: 1 1 auto;
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.roster-manager-hint {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.roster-manager-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.roster-manager-footer {
+  border-top: 1px solid var(--border);
+  justify-content: space-between;
+  padding-top: 10px;
+}
+
+.roster-manager-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.roster-manager-list li {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 8px 10px;
+}
+
+.roster-manager-item {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.roster-manager-item-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.roster-manager-applied {
+  background: color-mix(in srgb, #12b76a 14%, transparent);
+  border-radius: 999px;
+  color: #087443;
+  font-size: 0.7rem;
+  padding: 2px 8px;
+}
+
+.roster-manager-name {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.82rem;
+  gap: 4px;
+}
+
+.roster-manager-paste textarea {
+  font-family: inherit;
+  margin-bottom: 8px;
+  width: 100%;
+}
+
+.roster-manager-mapping {
+  background: var(--surface-subtle, #f7f8fb);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.roster-manager-columns {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.roster-manager-columns label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.78rem;
+  gap: 4px;
+}
+
+.roster-manager-warning {
+  background: #fff6e8;
+  border-radius: var(--radius-lg);
+  color: #8a5300;
+  font-size: 0.8rem;
+  margin: 0;
+  padding: 8px 10px;
+}
+
+.roster-manager-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.roster-manager-entries li {
+  align-items: center;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 28px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) 30px;
+}
+
+.roster-manager-entries li.is-duplicate input:first-of-type {
+  border-color: #f79009;
+}
+
+.roster-manager-index {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.roster-manager-entries input {
+  font-size: 0.85rem;
+  padding: 5px 8px;
+  width: 100%;
+}
+
+/* 文字雲的自訂詞彙。Opened from the header, above the cloud rather than over it,
+   so the presenter can see the words they are trying to fix while they type. */
+.word-cloud-terms {
+  background: rgb(255 255 255 / 6%);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 24px;
+  padding: 14px 16px;
+}
+
+.word-cloud-terms p {
+  font-size: 0.8rem;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.word-cloud-terms textarea {
+  font-family: inherit;
+  font-size: 0.9rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.word-cloud-terms-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.word-cloud-terms-toggle {
+  white-space: nowrap;
+}
+
+/* 彈幕時間軸。The bars are how many messages arrived when, so the shape of the
+   class is visible and an earlier wave can be grabbed without remembering the
+   clock. Dragging either handle trims; dragging the middle slides the window. */
+/* The handles stand proud of the track by design, so the room above and below
+   has to clear them or they sit on the clock labels. */
+.danmaku-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 16px 24px 0;
+}
+
+/* A third of what it was. The shape of the class is still legible at this
+   height and the cloud gets the space back. */
+.danmaku-timeline-track {
+  background: rgb(255 255 255 / 4%);
+  border-radius: 6px;
+  cursor: default;
+  height: 20px;
+  position: relative;
+  touch-action: none;
+}
+
+.danmaku-timeline-bars {
+  align-items: flex-end;
+  display: flex;
+  gap: 1px;
+  height: 100%;
+  padding: 3px 6px;
+  position: absolute;
+  inset: 0;
+}
+
+.danmaku-timeline-bars span {
+  background: rgb(120 160 255 / 55%);
+  border-radius: 2px;
+  flex: 1 1 0;
+  min-height: 2px;
+}
+
+/* Outside the window is dimmed rather than hidden, so the rest of the class
+   stays visible as somewhere to drag to. */
+.danmaku-timeline-shade {
+  background: rgb(10 14 28 / 68%);
+  border-radius: 6px;
+  bottom: 0;
+  position: absolute;
+  top: 0;
+}
+
+.danmaku-timeline-window {
+  border: 1px solid rgb(150 185 255 / 70%);
+  border-radius: 5px;
+  bottom: 0;
+  cursor: grab;
+  position: absolute;
+  top: 0;
+}
+
+.danmaku-timeline.is-dragging .danmaku-timeline-window {
+  cursor: grabbing;
+}
+
+.danmaku-timeline-handle {
+  background: #9fc0ff;
+  border: 0;
+  border-radius: 5px;
+  bottom: -7px;
+  cursor: ew-resize;
+  padding: 0;
+  position: absolute;
+  top: -7px;
+  transform: translateX(-50%);
+  width: 11px;
+}
+
+.danmaku-timeline-handle:hover,
+.danmaku-timeline-handle:focus-visible {
+  background: #cfe0ff;
+}
+
+/* A finger needs more than twelve pixels, and the classroom display is a very
+   large coarse pointer. */
+@media (any-pointer: coarse) {
+  .danmaku-timeline-track { height: 26px; }
+  .danmaku-timeline-handle { bottom: -11px; top: -11px; width: 22px; }
+}
+
+.danmaku-timeline-scale {
+  color: rgb(255 255 255 / 55%);
+  display: flex;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  justify-content: space-between;
+}
+
+.danmaku-timeline-scale strong {
+  color: #dbe6ff;
+  font-weight: 600;
+}
+
+/* A bigger circle on a touch display. The blanket min-height for touch targets
+   was stretching the head into an ellipse — it did this to the old rotated shape
+   too, which is part of why that one looked askew — so the pin sets its own size
+   and gets a target larger than the rule it opts out of. Only the student taps a
+   pin, to take their own mark back; on the presenter's copy they are disabled. */
+@media (any-pointer: coarse) {
+  .hotspot-pin {
+    height: 46px;
+    width: 34px;
+  }
+
+  .hotspot-pin > span {
+    font-size: 14px;
+    height: 34px;
+    width: 34px;
+  }
+
+  .hotspot-pin::after {
+    border-left-width: 7px;
+    border-right-width: 7px;
+    border-top-width: 13px;
+  }
+}
+
+/* ---- 討論板 ----
+   Three surfaces share this block: the setup panel in the dispatch dialog, the
+   class's own board, and the presenter's wall (in the side panel and in the
+   window that fills the screen). They are kept together because the card is the
+   same object in all of them and drifting apart would show. */
+
+.board-setup {
+  display: grid;
+  gap: 12px;
+}
+
+.board-formats {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin: 0;
+  padding: 12px 14px 14px;
+}
+
+.board-formats legend {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 0 6px;
+}
+
+.board-format-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+}
+
+.board-format-chip {
+  align-items: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.board-format-chip span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.board-format-chip.is-selected {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary-dark);
+}
+
+.board-format-chip.is-selected span { color: var(--primary-dark); }
+
+/* ---- the class's own board ---- */
+
+.participant-board {
+  display: grid;
+  gap: 12px;
+}
+
+.participant-board-heading {
+  align-items: baseline;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.participant-board-heading h2 { margin: 0; }
+
+.participant-board-count {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.participant-board-topic {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.participant-board-image {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  max-height: 260px;
+  object-fit: contain;
+  width: 100%;
+}
+
+.board-composer {
+  background: var(--surface-subtle);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.board-composer-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.board-composer-tab {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  display: inline-flex;
+  gap: 6px;
+  padding: 8px 14px;
+}
+
+.board-composer-tab.is-selected {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.board-composer-body {
+  display: grid;
+  gap: 8px;
+}
+
+.board-composer-body textarea {
+  min-height: 92px;
+  resize: vertical;
+}
+
+.board-file-pick {
+  align-items: center;
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  padding: 18px;
+}
+
+.board-file-pick input { display: none; }
+
+.board-recorder button.is-recording {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.board-cards {
+  display: grid;
+  gap: 10px;
+}
+
+.board-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.board-card.is-pinned { border-color: var(--energy); }
+.board-card.is-withdrawn { opacity: 0.55; }
+
+.board-card header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.board-card header strong { font-size: 14px; }
+
+.board-card-tag {
+  background: var(--surface-subtle);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.board-card-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.board-card-link,
+.board-wall-link {
+  word-break: break-all;
+}
+
+.board-card-image,
+.board-wall-image {
+  border-radius: var(--radius-sm);
+  max-height: 280px;
+  object-fit: contain;
+  width: 100%;
+}
+
+.board-card-file,
+.board-wall-file {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.board-card audio,
+.board-wall-card audio { width: 100%; }
+
+.board-card footer {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.board-card-reactions {
+  display: flex;
+  gap: 6px;
+}
+
+.board-reaction {
+  align-items: center;
+  background: var(--surface-subtle);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  /* Set here rather than inherited. A button in this app is normally filled
+     and its text is white, so the tally came out white on a near-white pill —
+     a contrast of 1.14 to 1, which is to say invisible. */
+  color: var(--text);
+  display: inline-flex;
+  gap: 5px;
+  min-height: 0;
+  padding: 4px 10px;
+}
+
+.board-reaction span {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.board-reaction.is-own {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary-dark);
+}
+
+.board-card-action {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  display: inline-flex;
+  gap: 4px;
+  min-height: 0;
+  padding: 4px 6px;
+}
+
+.board-card-action.is-danger { color: var(--danger); }
+
+.board-replies {
+  border-left: 2px solid var(--border);
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 10px;
+}
+
+.board-replies li { font-size: 14px; }
+.board-replies strong { margin-right: 6px; }
+
+.board-reply-composer {
+  display: flex;
+  gap: 8px;
+}
+
+.board-reply-composer input { flex: 1 1 auto; }
+
+/* Correcting a card in place, so the student keeps their eye on the words they
+   are fixing rather than on a dialog over the top of them. */
+.board-card-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.board-card-editor textarea {
+  font: inherit;
+  resize: vertical;
+  width: 100%;
+}
+
+.board-card-editor-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---- the presenter's wall ---- */
+
+.board-results-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Columns, so a wall reads as a wall rather than a list. The count follows the
+   width it is given: two in the panel beside the class list, as many as fit in
+   the window that fills the screen. */
+.board-wall {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
+.board-wall-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.board-wall-card.is-pinned { border-color: var(--energy); }
+.board-wall-card.is-hidden,
+.board-wall-card.is-withdrawn { opacity: 0.5; }
+
+.board-wall-card header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.board-wall-tag {
+  background: var(--surface-subtle);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.board-wall-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.board-wall-reactions {
+  color: var(--text);
+  display: flex;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  gap: 10px;
+}
+
+.board-wall-replies {
+  border-left: 2px solid var(--border);
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 8px;
+}
+
+.board-wall-replies strong { margin-right: 6px; }
+
+.board-wall-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.board-wall-actions button {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  min-height: 0;
+  padding: 4px 8px;
+}
+
+/* ---- the window that fills the screen ---- */
+
+.board-review-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100vh;
+  overflow: auto;
+  padding: 18px 22px 24px;
+}
+
+.board-review-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.board-review-heading h1 { margin: 0; }
+.board-review-heading p { color: var(--muted); margin: 4px 0 0; }
+
+.board-review-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+}
+
+.board-review-image {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  max-height: 220px;
+  object-fit: contain;
+  width: 100%;
+}
+
+/* A tally on your own card: the same shape as the button, without being one. */
+.board-reaction.is-static {
+  background: none;
+  color: var(--muted);
+  cursor: default;
+  padding-left: 0;
+}
+
+/* Shown in a detail window whose page threw while rendering. */
+.window-error {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  padding: 28px;
+}
+
+.window-error h1 { margin: 0; }
+
+.window-error pre {
+  background: var(--surface-subtle);
+  border-radius: var(--radius-sm);
+  max-width: 100%;
+  overflow: auto;
+  padding: 12px 14px;
+  white-space: pre-wrap;
+}
+
+/* ---- the drawing board ---- */
+
+.board-drawing {
+  gap: 10px;
+}
+
+.board-drawing-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.board-drawing-group {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+}
+
+.board-drawing-group button {
+  border-radius: 999px;
+  min-height: 0;
+  padding: 6px 12px;
+}
+
+.board-drawing-group .is-selected {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.board-swatch {
+  border: 2px solid transparent;
+  border-radius: 50%;
+  height: 26px;
+  min-height: 0;
+  padding: 0;
+  width: 26px;
+}
+
+.board-swatch.is-selected {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--surface) inset;
+}
+
+.board-width {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  display: flex;
+  height: 30px;
+  justify-content: center;
+  min-height: 0;
+  padding: 0;
+  width: 30px;
+}
+
+.board-width span {
+  background: var(--text);
+  border-radius: 50%;
+  display: block;
+}
+
+.board-width.is-selected {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+}
+
+.board-drawing-surface {
+  position: relative;
+}
+
+/* touch-action is the whole reason a finger can draw here rather than
+   scrolling the page out from under the stroke. */
+.board-drawing-surface canvas {
+  background: #fff;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  cursor: crosshair;
+  display: block;
+  touch-action: none;
+  width: 100%;
+}
+
+.board-drawing-text-input {
+  position: absolute;
+  transform: translate(0, -4px);
+}
+
+.board-drawing-text-input input {
+  font-size: 16px;
+  min-width: 160px;
+}
+
+.board-drawing-hint {
+  font-size: 13px;
+  margin: 0;
+}
+
+/* The text box needs its own buttons, because committing on blur is what
+   stopped it working with a mouse. */
+.board-drawing-text-input {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+}
+
+.board-drawing-text-input button {
+  min-height: 0;
+  padding: 6px 8px;
+}
+
+/* The three board controls belong on one line: they are one decision each
+   about the same wall, and wrapping them made the panel look like a form. */
+.board-results-actions {
+  flex-wrap: nowrap;
+}
+
+.board-results-actions button {
+  flex: 1 1 0;
+  justify-content: center;
+  min-width: 0;
+  padding-left: 8px;
+  padding-right: 8px;
+  white-space: nowrap;
+}
+
+/* ---- what a student sees about a closed question ---- */
+
+.participant-review {
+  display: grid;
+  gap: 10px;
+}
+
+.participant-review-line {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.participant-review-label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.participant-review-verdict {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-weight: 700;
+  gap: 6px;
+  justify-self: start;
+  margin: 0;
+  padding: 4px 12px;
+}
+
+.participant-review-verdict.is-correct {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.participant-review-verdict.is-wrong {
+  background: var(--danger-soft);
+  color: var(--danger-dark);
+}
+
+.participant-review-sequence {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.participant-review-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.participant-review-tiles img {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-height: 72px;
+}
+
+/* The page a student handed in, at the width they have. A 電寫題 answer is
+   their own handwriting — shrunk to a tile it is a grey smudge, and the whole
+   point of showing it back is that they can read what they wrote. */
+.participant-review-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+
+.participant-review-pages img {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: block;
+  width: 100%;
+}
+
+/* Something the page cannot draw — a spreadsheet, a slide deck, an archive.
+   The icon says which, because the student is checking they sent the right
+   thing and the name alone reads as a wall of characters. */
+.participant-review-files {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 6px 0 10px;
+  padding: 0;
+}
+
+.participant-review-files a {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  gap: 8px;
+  overflow-wrap: anywhere;
+  padding: 9px 11px;
+  text-decoration: none;
+}
+
+.participant-review-files svg {
+  color: var(--muted);
+  flex: none;
+}
+
+/* 配對題: the prompt and what the student put against it, side by side. A
+   list of the right-hand halves alone cannot be read — the student has no way
+   of telling which prompt an answer belonged to. */
+.participant-review-pairs {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.participant-review-pairs th {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 8px 4px 0;
+  text-align: left;
+}
+
+.participant-review-pairs td {
+  border-top: 1px solid var(--border);
+  padding: 6px 8px 6px 0;
+  vertical-align: top;
+}
+
+.participant-review-pairs tr.is-wrong td:nth-child(2) {
+  color: var(--danger-dark);
+}
+
+.participant-review-item {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 6px;
+  padding-top: 12px;
+}
+
+.participant-review-item .participant-review-verdict {
+  font-size: 13px;
+  padding: 2px 10px;
+}
+
+/* What the AI made of a question, shown to the student under their own answer.
+   Quiet on purpose: it is a second opinion sitting beside what they wrote, not
+   a correction stamped over it. */
+.participant-ai-answer {
+  border-left: 3px solid var(--primary);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  padding-left: 12px;
+}
+
+.participant-ai-answer small {
+  color: var(--text-muted, #687386);
+}
+
+.participant-ai-suggested {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.camera-gesture-editor { display: grid; gap: .75rem; padding: 1rem; border: 1px solid var(--border); border-radius: 18px; }
+.camera-gesture-editor h3 { margin: 0; }
+.camera-gesture-editor label { display: grid; grid-template-columns: minmax(5rem, .7fr) minmax(10rem, 1.3fr); gap: .75rem; align-items: center; }
+.camera-poll-backdrop { z-index: 12000; }
+.camera-poll-native-page { height: 100vh; overflow: auto; padding: 24px; background: var(--surface); }
+.camera-poll-window-panel { display: grid; gap: 18px; width: 100%; min-width: 0; }
+.camera-poll-window-panel .modal-heading { display: flex; justify-content: space-between; gap: 20px; }
+.camera-poll-window-panel .modal-heading h2 { display: flex; align-items: center; gap: 10px; margin: 0; }
+.camera-poll-setup { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(320px, 2fr); gap: 18px; }
+.camera-poll-setup-fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+.camera-poll-setup > details { grid-column: 1 / -1; }
+.camera-poll-setup > label { min-width: 0; }
+.camera-poll-setup > label:has(textarea), .camera-poll-setup > p { grid-column: 1 / -1; }
+.camera-poll-paper-responses { display: grid; gap: 16px; min-width: 0; }
+.camera-poll-paper-responses textarea { width: 100%; min-height: 90px; }
+.camera-poll-paper-responses p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.camera-poll-setup textarea { min-height: 85px; }
+.camera-poll-mapping { display: grid; grid-template-columns: 1fr 2fr auto; gap: 10px; margin-top: 10px; }
+.camera-poll-native-content .camera-poll-preview { max-height: 48vh; }
+.camera-poll-modal { width: min(900px, calc(100vw - 2rem)); max-height: 92vh; overflow: auto; }
+.camera-poll-preview-wrap { display: grid; gap: 1rem; justify-items: center; position: relative; }
+.camera-poll-preview { width: 100%; max-height: 58vh; object-fit: contain; border-radius: 18px; background: #0f172a; }
+.settings-camera-preview { width: min(100%, 420px); max-height: 220px; object-fit: contain; border-radius: 14px; background: #0f172a; }
+.camera-poll-countdown { position: absolute; inset: 20% auto auto 50%; transform: translateX(-50%); color: white; font-size: clamp(5rem, 18vw, 12rem); text-shadow: 0 5px 25px #000; }
+.camera-poll-legend { display: flex; flex-wrap: wrap; gap: .55rem; justify-content: center; }
+.camera-poll-legend span { padding: .5rem .75rem; background: var(--soft-purple, #eef0ff); border-radius: 999px; }
+.camera-poll-review { display: grid; gap: .8rem; }
+.camera-poll-review > label { display: grid; grid-template-columns: 1fr 7rem; align-items: center; gap: 1rem; }
+.camera-poll-result { display: grid; gap: 1rem; }
+.camera-poll-result-heading { display: flex; gap: .75rem; align-items: flex-start; }
+.camera-poll-result-heading h2, .camera-poll-result-heading p { margin: 0; }
+.camera-poll-bars { display: grid; gap: .75rem; }
+.camera-poll-bar-row { display: grid; grid-template-columns: minmax(6rem, .8fr) minmax(8rem, 2fr) 3rem; gap: .7rem; align-items: center; }
+.camera-poll-bar-row > div { height: 1rem; border-radius: 999px; overflow: hidden; background: #eef0f5; }
+.camera-poll-bar-row > div > span { display: block; height: 100%; min-width: 3px; border-radius: inherit; background: var(--accent, #5b5ce2); }
+@media (max-width: 640px) {
+  .camera-gesture-editor label, .camera-poll-review > label { grid-template-columns: 1fr; }
+  .camera-poll-bar-row { grid-template-columns: minmax(5rem, .8fr) minmax(5rem, 1.5fr) 2.5rem; }
+}
+.rating-scale { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 8px; margin-top: 20px; }
+.rating-scale button { display: flex; justify-content: center; align-items: center; min-width: 0; width: 100%; padding: 12px 4px; min-height: 54px; font-size: 20px; }
+.rating-scale .selected-rating { background: var(--primary, #6157ed); color: white; }
+.rating-endpoints { display: flex; justify-content: space-between; margin: 12px 0 22px; color: #64748b; }
+.rating-summary { display: flex; flex-wrap: wrap; gap: 24px; margin: 18px 0; }
+.rating-summary strong { font-size: 28px; }
+.rating-filter { display: flex; align-items: center; gap: 10px; }
+.rating-filter input { flex: 0 0 20px; width: 20px; height: 20px; }
+.rating-distribution { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
+.rating-distribution > div { display: flex; flex-direction: column; text-align: center; gap: 4px; border: 1px solid #dce1ec; border-radius: 12px; padding: 8px 2px; }
+@media (max-width: 600px) { .rating-scale { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
